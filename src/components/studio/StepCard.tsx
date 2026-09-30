@@ -15,10 +15,9 @@ export function StepCard({ index, title, description, done, children, aside }: S
   return (
     <section
       className={cn(
-        "rounded-2xl border border-border bg-card p-5 transition-colors sm:p-6",
-        done && "border-primary/40",
+        "glass-panel rounded-2xl border p-5 transition-all duration-300 hover:border-primary/25 sm:p-6",
+        done && "border-primary/45 shadow-[var(--shadow-panel),var(--shadow-glow)]",
       )}
-      style={{ boxShadow: "var(--shadow-panel)" }}
     >
       <header className="mb-4 flex items-start gap-3">
         <span

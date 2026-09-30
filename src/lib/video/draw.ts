@@ -40,12 +40,12 @@ export function drawCaption(
   text: string,
   w: number,
   h: number,
-  opts: { fontScale?: number; bottom?: number } = {},
+  opts: { fontScale?: number; bottom?: number; progress?: number; accent?: string } = {},
 ) {
   const fontSize = Math.round(h * 0.05 * (opts.fontScale ?? 1));
   ctx.save();
   ctx.font = `700 ${fontSize}px Inter, "Segoe UI", system-ui, sans-serif`;
-  ctx.textAlign = "center";
+  ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   const maxWidth = w * 0.82;
   const lines = wrapText(ctx, text, maxWidth);
@@ -67,13 +67,30 @@ export function drawCaption(
   );
   ctx.fill();
 
+  const captionProgress = Math.max(0, Math.min(1, opts.progress ?? 0));
+  const completedCharacters = Math.floor(text.length * captionProgress);
+  let characterOffset = 0;
+
   lines.forEach((line, i) => {
     const y = startY + i * lineHeight;
+    const x = (w - ctx.measureText(line).width) / 2;
     ctx.lineWidth = fontSize * 0.14;
     ctx.strokeStyle = "rgba(0,0,0,0.85)";
-    ctx.strokeText(line, w / 2, y);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillText(line, w / 2, y);
+    ctx.strokeText(line, x, y);
+    ctx.fillStyle = "rgba(255,255,255,0.82)";
+    ctx.fillText(line, x, y);
+
+    const completedInLine = Math.max(
+      0,
+      Math.min(line.length, completedCharacters - characterOffset),
+    );
+    if (completedInLine > 0) {
+      const highlighted = line.slice(0, completedInLine);
+      ctx.strokeText(highlighted, x, y);
+      ctx.fillStyle = opts.accent ?? "#ffd23f";
+      ctx.fillText(highlighted, x, y);
+    }
+    characterOffset += line.length + 1;
   });
   ctx.restore();
 }
@@ -95,9 +112,8 @@ export function roundRect(
   ctx.closePath();
 }
 
-export function captionAt(captions: Caption[], t: number): string | null {
-  const hit = captions.find((c) => t >= c.start && t < c.end);
-  return hit ? hit.text : null;
+export function captionAt(captions: Caption[], t: number): Caption | null {
+  return captions.find((c) => t >= c.start && t < c.end) ?? null;
 }
 
 export function drawFrame(
@@ -129,7 +145,12 @@ export function drawFrame(
   }
 
   if (captions) {
-    const text = captionAt(captions, t);
-    if (text) drawCaption(ctx, text, w, h);
+    const caption = captionAt(captions, t);
+    if (caption) {
+      const captionDuration = Math.max(0.001, caption.end - caption.start);
+      drawCaption(ctx, caption.text, w, h, {
+        progress: (t - caption.start) / captionDuration,
+      });
+    }
   }
 }

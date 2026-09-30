@@ -8,6 +8,7 @@ export interface SourceImage {
   id: string;
   name: string;
   url: string;
+  dataUrl?: string;
   element: HTMLImageElement;
 }
 

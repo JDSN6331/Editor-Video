@@ -1,0 +1,40 @@
+import { Film, CheckCircle2 } from "lucide-react";
+
+export function AboutSidebar() {
+  return (
+    <div className="glass-panel rounded-2xl border p-5 text-sm text-muted-foreground">
+      <h2 className="mb-2 flex items-center gap-2 font-display text-base font-semibold text-foreground">
+        <Film className="size-4 text-primary" /> Recursos do Estúdio
+      </h2>
+      <ul className="space-y-2.5 text-xs">
+        <li className="flex items-start gap-2">
+          <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0 mt-0.5" />
+          <span>
+            <strong>Exportação MP4 / WebM:</strong> saída em MP4 otimizado para o YouTube.
+          </span>
+        </li>
+        <li className="flex items-start gap-2">
+          <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0 mt-0.5" />
+          <span>
+            <strong>Persistência Dual:</strong> SQLite localmente e PostgreSQL para VPS Hostinger
+            (Easypanel).
+          </span>
+        </li>
+        <li className="flex items-start gap-2">
+          <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0 mt-0.5" />
+          <span>
+            <strong>Reordenação de Imagens:</strong> drag-and-drop nativo ou botões de ordenação
+            rápida.
+          </span>
+        </li>
+        <li className="flex items-start gap-2">
+          <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0 mt-0.5" />
+          <span>
+            <strong>Linha do Tempo Interativa:</strong> navegação temporal por scrubbing e preview
+            de quadros.
+          </span>
+        </li>
+      </ul>
+    </div>
+  );
+}
