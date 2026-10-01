@@ -44,55 +44,18 @@ function isH3SwallowedErrorBody(body: string): boolean {
   }
 }
 
-/**
- * Adds Cross-Origin Isolation headers required by FFmpeg WASM.
- * SharedArrayBuffer (used internally by ffmpeg-core.wasm) is only available
- * when the page is served with COOP + COEP headers. Without these, FFmpeg
- * WASM will silently fail or hang during transcoding — which is the root cause
- * of the "85% freeze" when deploying to the Hostinger VPS / Easypanel.
- */
-function addCrossOriginHeaders(response: Response): Response {
-  const headers = new Headers(response.headers);
-  headers.set("Cross-Origin-Opener-Policy", "same-origin");
-  headers.set("Cross-Origin-Embedder-Policy", "require-corp");
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-}
-
-import {
-  handleFetchTranscode,
-  handleFetchTranscodeStatus,
-  handleFetchTranscodeProgress,
-} from "./server/transcode-service";
-
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
-    const url = new URL(request.url);
-    if (url.pathname === "/api/transcode/status" && request.method === "GET") {
-      return addCrossOriginHeaders(await handleFetchTranscodeStatus());
-    }
-    if (url.pathname === "/api/transcode/progress" && request.method === "GET") {
-      return addCrossOriginHeaders(await handleFetchTranscodeProgress(url));
-    }
-    if (url.pathname === "/api/transcode" && request.method === "POST") {
-      return addCrossOriginHeaders(await handleFetchTranscode(request));
-    }
-
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
-      const normalized = await normalizeCatastrophicSsrResponse(response);
-      return addCrossOriginHeaders(normalized);
+      return await normalizeCatastrophicSsrResponse(response);
     } catch (error) {
       console.error(error);
-      const errResponse = new Response(renderErrorPage(), {
+      return new Response(renderErrorPage(), {
         status: 500,
         headers: { "content-type": "text/html; charset=utf-8" },
       });
-      return addCrossOriginHeaders(errResponse);
     }
   },
 };

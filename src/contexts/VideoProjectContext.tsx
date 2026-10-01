@@ -9,6 +9,7 @@ import {
 } from "react";
 import type { Caption, PresetKey, SourceImage } from "@/lib/video/types";
 import { buildCaptions } from "@/lib/video/captions";
+import { buildAudioSyncedCaptions } from "@/lib/video/audioSync";
 import { decodeAudio } from "@/lib/video/render";
 import { getDbInfoFn, getProjectFn, saveProjectFn } from "@/api/projects";
 import { toast } from "sonner";
@@ -77,6 +78,16 @@ interface VideoProjectContextType {
   maxChars: number;
   setMaxChars: (value: number) => void;
   captions: Caption[];
+  autoSyncCaptions: boolean;
+  setAutoSyncCaptions: (value: boolean) => void;
+  vadSensitivity: number;
+  setVadSensitivity: (value: number) => void;
+  vadMinSilence: number;
+  setVadMinSilence: (value: number) => void;
+  pausesCount: number;
+  isCustomizedCaptions: boolean;
+  updateCaption: (index: number, updated: Partial<Caption>) => void;
+  resetCaptionsToAuto: () => void;
 
   // Video settings & Format
   preset: PresetKey;
@@ -211,6 +222,10 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   // 4 — Legendas
   const [showCaptions, setShowCaptions] = useState(true);
   const [maxChars, setMaxChars] = useState(90);
+  const [autoSyncCaptions, setAutoSyncCaptions] = useState(true);
+  const [vadSensitivity, setVadSensitivity] = useState(0.12);
+  const [vadMinSilence, setVadMinSilence] = useState(0.35);
+  const [customCaptions, setCustomCaptions] = useState<Caption[] | null>(null);
 
   // 5 — Música de fundo
   const [music, setMusic] = useState<AudioItem | null>(null);
@@ -245,10 +260,54 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   const perImage = images.length ? duration / images.length : 0;
   const effectiveMusicVolume = (duckOnly ? Math.min(musicVolume, 30) : musicVolume) / 100;
 
-  const captions = useMemo(
-    () => (script.trim() && duration ? buildCaptions(script, duration, maxChars) : []),
-    [script, duration, maxChars],
+  const { captions: generatedCaptions, pausesCount } = useMemo(() => {
+    if (!script.trim() || duration <= 0) {
+      return { captions: [], pausesCount: 0 };
+    }
+    if (autoSyncCaptions && narration?.buffer) {
+      return buildAudioSyncedCaptions(script, narration.buffer, duration, maxChars, {
+        sensitivity: vadSensitivity,
+        minSilenceSec: vadMinSilence,
+      });
+    }
+    return {
+      captions: buildCaptions(script, duration, maxChars),
+      pausesCount: 0,
+    };
+  }, [
+    script,
+    duration,
+    maxChars,
+    autoSyncCaptions,
+    narration?.buffer,
+    vadSensitivity,
+    vadMinSilence,
+  ]);
+
+  const captions = customCaptions ?? generatedCaptions;
+  const isCustomizedCaptions = customCaptions !== null;
+
+  const updateCaption = useCallback(
+    (index: number, updated: Partial<Caption>) => {
+      setCustomCaptions((prev) => {
+        const base = prev ?? [...generatedCaptions];
+        const next = [...base];
+        if (next[index]) {
+          next[index] = { ...next[index], ...updated };
+        }
+        return next;
+      });
+    },
+    [generatedCaptions],
   );
+
+  const resetCaptionsToAuto = useCallback(() => {
+    setCustomCaptions(null);
+  }, []);
+
+  useEffect(() => {
+    setCustomCaptions(null);
+  }, [script, narration?.url]);
 
   /* ── Detectar Banco de Dados ── */
   useEffect(() => {
@@ -730,6 +789,16 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       maxChars,
       setMaxChars,
       captions,
+      autoSyncCaptions,
+      setAutoSyncCaptions,
+      vadSensitivity,
+      setVadSensitivity,
+      vadMinSilence,
+      setVadMinSilence,
+      pausesCount,
+      isCustomizedCaptions,
+      updateCaption,
+      resetCaptionsToAuto,
       preset,
       setPreset,
       fps,
@@ -786,6 +855,13 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       showCaptions,
       maxChars,
       captions,
+      autoSyncCaptions,
+      vadSensitivity,
+      vadMinSilence,
+      pausesCount,
+      isCustomizedCaptions,
+      updateCaption,
+      resetCaptionsToAuto,
       preset,
       fps,
       kenBurns,

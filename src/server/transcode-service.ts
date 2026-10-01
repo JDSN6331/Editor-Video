@@ -27,8 +27,9 @@ export function getFfmpegPath(): string | null {
   if (ffmpegChecked) return cachedFfmpegPath;
 
   // 1. Variável de ambiente explícita
-  if (process.env.FFMPEG_PATH && existsSync(process.env.FFMPEG_PATH)) {
-    cachedFfmpegPath = process.env.FFMPEG_PATH;
+  const customFfmpeg = process.env["FFMPEG_PATH"];
+  if (customFfmpeg && existsSync(customFfmpeg)) {
+    cachedFfmpegPath = customFfmpeg;
     ffmpegChecked = true;
     return cachedFfmpegPath;
   }
@@ -37,7 +38,7 @@ export function getFfmpegPath(): string | null {
   try {
     if (process.platform === "win32") {
       const wingetPath = path.join(
-        process.env.LOCALAPPDATA || "",
+        process.env["LOCALAPPDATA"] || "",
         "Microsoft",
         "WinGet",
         "Links",
@@ -100,7 +101,7 @@ export function getFfmpegVersion(): string {
     })
       .toString()
       .split("\n")[0];
-    return out.trim();
+    return (out || "").trim();
   } catch {
     return "Desconhecido";
   }
@@ -108,7 +109,7 @@ export function getFfmpegVersion(): string {
 
 function parseFfmpegTime(timeStr: string): number {
   const parts = timeStr.trim().split(":");
-  if (parts.length === 3) {
+  if (parts.length === 3 && parts[0] && parts[1] && parts[2]) {
     const hours = parseFloat(parts[0]) || 0;
     const minutes = parseFloat(parts[1]) || 0;
     const seconds = parseFloat(parts[2]) || 0;

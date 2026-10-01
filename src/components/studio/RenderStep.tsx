@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState } from "react";
 import {
   Download,
   Play,
@@ -18,6 +18,7 @@ import { formatTime } from "@/lib/video/captions";
 import { renderVideo } from "@/lib/video/render";
 import { VIDEO_PRESETS, type PresetKey } from "@/lib/video/types";
 import { downloadBlob } from "@/lib/utils";
+import { GoogleDriveUpload } from "./GoogleDriveUpload";
 
 export function RenderStep() {
   const {
@@ -53,18 +54,6 @@ export function RenderStep() {
   const previewRef = useRef<HTMLCanvasElement>(null);
   const cancelRef = useRef({ cancelled: false });
   const [renderStage, setRenderStage] = useState<"rendering" | "encoding">("rendering");
-  const [stageLabel, setStageLabel] = useState<string>("");
-  const [serverFfmpeg, setServerFfmpeg] = useState<{
-    available: boolean;
-    version?: string | null;
-  } | null>(null);
-
-  useEffect(() => {
-    fetch("/api/transcode/status")
-      .then((r) => r.json())
-      .then((data) => setServerFfmpeg(data))
-      .catch(() => setServerFfmpeg({ available: false }));
-  }, []);
 
   // Validação dos requisitos para renderização
   const hasScript = Boolean(script.trim());
@@ -100,10 +89,9 @@ export function RenderStep() {
         fade: Math.min(0.6, perImage / 4),
         format: preferredFormat,
         previewCanvas: previewRef.current,
-        onProgress: (value, stage, label) => {
+        onProgress: (value, stage) => {
           setProgress(value);
           setRenderStage(stage);
-          if (label) setStageLabel(label);
         },
         cancelRef: cancelRef.current,
       });
@@ -114,15 +102,12 @@ export function RenderStep() {
         size: out.blob.size,
       });
       setProgress(100);
-
-      // Notify user if we fell back from MP4 to WebM
-      if (preferredFormat === "mp4" && out.extension === "webm") {
-        setError(
-          "A conversão para MP4 não foi possível neste navegador. " +
-            "O vídeo foi salvo em WebM (compatível com o YouTube).",
-        );
-      }
     } catch (e) {
+      if (cancelRef.current.cancelled || (e instanceof Error && e.message === "CANCELLED")) {
+        setError(null);
+        setProgress(0);
+        return;
+      }
       setError(e instanceof Error ? e.message : "Falha ao montar o vídeo.");
     } finally {
       setRendering(false);
@@ -210,19 +195,7 @@ export function RenderStep() {
       {/* Opções de Vídeo e Formato */}
       <div className="grid gap-x-6 gap-y-5 sm:grid-cols-2">
         <div className="min-w-0">
-          <div className="flex items-center justify-between">
-            <Label className="text-xs text-muted-foreground">Formato de Saída</Label>
-            {serverFfmpeg?.available ? (
-              <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-400 border border-emerald-500/20">
-                <CheckCircle2 className="size-3 text-emerald-400" />
-                FFmpeg Nativo Ativo
-              </span>
-            ) : serverFfmpeg !== null ? (
-              <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400 border border-amber-500/20">
-                WASM Navegador
-              </span>
-            ) : null}
-          </div>
+          <Label className="text-xs text-muted-foreground">Formato de Saída</Label>
           <div className="mt-2 flex flex-wrap gap-1.5">
             <Button
               size="sm"
@@ -334,30 +307,40 @@ export function RenderStep() {
         )}
       </div>
 
+      {/* Upload para Google Drive (Fase pós-render) */}
+      {result && (
+        <GoogleDriveUpload
+          videoUrl={result.url}
+          fileName={`${projectName.toLowerCase().replace(/[^a-z0-9]/g, "-")}.${result.extension}`}
+          fileSize={result.size}
+        />
+      )}
+
       {/* Progresso de Montagem */}
       {rendering && (
-        <div className="mt-4 rounded-xl border border-border bg-card/60 p-4">
-          <div className="flex justify-between text-xs mb-2">
+        <div className="mt-4 rounded-xl border border-primary/30 bg-primary/5 p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between text-xs mb-2 gap-2">
             <span className="font-semibold flex items-center gap-1.5 text-primary">
-              <Sparkles className="size-3.5 animate-pulse shrink-0" />
-              <span className="truncate">
-                {stageLabel ||
-                  (renderStage === "rendering"
-                    ? `Montando vídeo frame a frame (${Math.round(progress)}%)`
-                    : `Codificando no servidor FFmpeg (${Math.round(progress)}%)`)}
-              </span>
-            </span>
-            <span className="text-muted-foreground font-mono shrink-0 ml-2">
+              <Sparkles className="size-3.5 animate-pulse text-primary" />
               {renderStage === "rendering"
-                ? `${formatTime((progress / 85) * duration)} / ${formatTime(duration)}`
-                : `${Math.round(progress)}%`}
+                ? `Etapa 1/2: Gravando vídeo e áudio (${Math.round((progress / 85) * 100)}%)`
+                : `Etapa 2/2: Finalizando MP4 fluido e timeline (${Math.round(
+                    Math.max(0, Math.min(100, ((progress - 85) / 15) * 100)),
+                  )}%)`}
+            </span>
+            <span className="text-foreground/80 font-mono font-medium text-xs bg-background/80 px-2 py-0.5 rounded border border-border">
+              {renderStage === "rendering"
+                ? `${formatTime(Math.min(duration, (progress / 85) * duration))} / ${formatTime(duration)}`
+                : `${formatTime(
+                    Math.min(duration, Math.max(0, (progress - 85) / 15) * duration),
+                  )} / ${formatTime(duration)}`}
             </span>
           </div>
-          <Progress value={progress} />
-          <p className="mt-2 text-[11px] text-muted-foreground">
+          <Progress value={progress} className="h-2.5" />
+          <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
             {renderStage === "rendering"
-              ? "A captura grava o canvas com sincronização de áudio e legendas em tempo real."
-              : "Transcodificação com FFmpeg nativo multicore no servidor. Converte em segundos sem travar o navegador."}
+              ? "Desenhando cada quadro com animação, legendas e mixando trilha sonora..."
+              : "Codificando em H.264/AAC com taxa constante de quadros (sem travamentos) e gerando cabeçalho FastStart para busca rápida na timeline."}
           </p>
         </div>
       )}
@@ -370,11 +353,13 @@ export function RenderStep() {
       )}
 
       {/* Preview Player / Canvas */}
-      <div className="mt-5 overflow-hidden rounded-xl border border-border bg-black shadow-inner">
-        {result ? (
-          <video src={result.url} controls className="w-full aspect-video" />
-        ) : (
-          <canvas ref={previewRef} className="aspect-video w-full" />
+      <div className="mt-5 overflow-hidden rounded-xl border border-border bg-black shadow-inner relative aspect-video flex items-center justify-center">
+        <canvas
+          ref={previewRef}
+          className={`w-full h-full object-contain ${result ? "hidden" : "block"}`}
+        />
+        {result && (
+          <video src={result.url} controls className="w-full h-full object-contain" />
         )}
       </div>
     </StepCard>

@@ -1,6 +1,6 @@
 import { drawFrame } from "./draw";
 import type { Caption } from "./types";
-import { transcodeViaServer, transcodeWebMToMp4 } from "./transcode";
+import { transcodeWebMToMp4 } from "./transcode";
 
 declare global {
   interface Window {
@@ -22,7 +22,7 @@ export interface RenderOptions {
   fade: number;
   format?: "mp4" | "webm";
   previewCanvas?: HTMLCanvasElement | null;
-  onProgress?: (progress: number, stage: "rendering" | "encoding", label?: string) => void;
+  onProgress?: (progress: number, stage: "rendering" | "encoding") => void;
   cancelRef?: { cancelled: boolean };
 }
 
@@ -38,8 +38,8 @@ export function pickMimeType(): {
   extension: string;
 } {
   const webmCandidates = [
-    { mimeType: "video/webm;codecs=vp9,opus", extension: "webm" },
     { mimeType: "video/webm;codecs=vp8,opus", extension: "webm" },
+    { mimeType: "video/webm;codecs=vp9,opus", extension: "webm" },
     { mimeType: "video/webm", extension: "webm" },
   ];
 
@@ -93,13 +93,6 @@ async function ensureImagesReady(images: HTMLImageElement[]) {
 /**
  * Renderiza o vídeo em tempo real: canvas (vídeo) + WebAudio (narração + trilha)
  * capturados por MediaRecorder. A duração do vídeo = duração da narração.
- *
- * Improvements over original:
- * - Robust end-of-recording handling with multiple safety mechanisms
- * - Proper MediaRecorder state management to prevent "already stopped" errors
- * - Incremental encoding progress instead of jumping from 85% → 100%
- * - Timeout protection for the FFmpeg encoding phase
- * - Fallback to WebM if MP4 conversion fails
  */
 export async function renderVideo(options: RenderOptions): Promise<RenderResult> {
   const {
@@ -133,9 +126,11 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
   if (!ctx) throw new Error("Canvas indisponível neste navegador.");
 
   const previewCtx = previewCanvas?.getContext("2d") ?? null;
-  if (previewCanvas) {
+  if (previewCanvas && previewCtx) {
     previewCanvas.width = Math.round(width / 2);
     previewCanvas.height = Math.round(height / 2);
+    drawFrame(ctx, images, 0, duration, width, height, captions, { kenBurns, fade });
+    previewCtx.drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
   }
 
   const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -187,13 +182,9 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
   silentOutput.connect(audioCtx.destination);
 
   const { mimeType } = pickMimeType();
-
-  // Use a more conservative bitrate and request data more frequently
-  // to avoid accumulating huge chunks that stress memory.
-  const videoBps = width >= 1920 ? 8_000_000 : 5_000_000;
   const recorder = new MediaRecorder(
     stream,
-    mimeType ? { mimeType, videoBitsPerSecond: videoBps } : undefined,
+    mimeType ? { mimeType, videoBitsPerSecond: width >= 1920 ? 6_000_000 : 3_500_000 } : undefined,
   );
   const chunks: BlobPart[] = [];
   recorder.ondataavailable = (e) => {
@@ -220,10 +211,7 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
   if (audioCtx.state !== "running") {
     throw new Error("O navegador manteve o áudio suspenso. Clique novamente em montar o vídeo.");
   }
-
-  // Request data every 500ms instead of 1000ms — smaller, more frequent chunks
-  // reduce peak memory and improve the reliability of the final Blob assembly.
-  recorder.start(500);
+  recorder.start(1000);
   if (recorder.state !== "recording") {
     throw new Error("Não foi possível iniciar o gravador de vídeo.");
   }
@@ -233,127 +221,84 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
   narrationSource.start(audioStartTime);
   musicSource?.start(audioStartTime);
 
-  // ---------- Frame-by-frame rendering loop ----------
-  await new Promise<void>((resolve) => {
-    let stopClock = () => {};
-    let lastPreviewAt = 0;
-    let lastProgressAt = 0;
-    const tick = () => {
-      // performance.now() is monotonic and keeps video progress independent of
-      // AudioContext clock quirks seen in some Chromium/Windows configurations.
-      const t = (performance.now() - wallStartTime) / 1000;
-      if (cancelRef?.cancelled || t >= duration) {
-        stopClock();
-        drawFrame(ctx, images, Math.max(0, duration - 0.01), duration, width, height, captions, {
-          kenBurns,
-          fade,
-        });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let stopClock = () => {};
+      let lastPreviewAt = 0;
+      let lastProgressAt = 0;
+      const tick = () => {
+        if (cancelRef?.cancelled) {
+          stopClock();
+          reject(new Error("CANCELLED"));
+          return;
+        }
+        const t = (performance.now() - wallStartTime) / 1000;
+        if (t >= duration) {
+          stopClock();
+          drawFrame(ctx, images, Math.max(0, duration - 0.01), duration, width, height, captions, {
+            kenBurns,
+            fade,
+          });
+          videoTrack.requestFrame();
+          resolve();
+          return;
+        }
+        const clamped = Math.max(0, t);
+        drawFrame(ctx, images, clamped, duration, width, height, captions, { kenBurns, fade });
         videoTrack.requestFrame();
-        resolve();
-        return;
-      }
-      const clamped = Math.max(0, t);
-      drawFrame(ctx, images, clamped, duration, width, height, captions, { kenBurns, fade });
-      videoTrack.requestFrame();
-      if (previewCtx && previewCanvas && clamped - lastPreviewAt >= 0.1) {
-        previewCtx.drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
-        lastPreviewAt = clamped;
-      }
-      if (clamped - lastProgressAt >= 0.25) {
-        onProgress?.((clamped / duration) * 85, "rendering");
-        lastProgressAt = clamped;
-      }
-    };
-    // Capturing 60 full-HD canvas frames per second can starve MediaRecorder.
-    // The final encoder still emits the selected FPS with stable timestamps.
-    stopClock = createFrameClock(Math.min(fps, 30), tick);
-    tick();
-  });
-
-  // ---------- Finalize recording ----------
-  // Give MediaRecorder time to flush its internal buffer and write the final chunk.
-  // 500ms is generous; most implementations need < 100ms.
-  await new Promise((r) => setTimeout(r, 500));
-
-  // Stop recorder safely (it may already have been stopped by the browser).
-  if (recorder.state !== "inactive") {
-    try {
+        if (previewCtx && previewCanvas && (clamped - lastPreviewAt >= 0.08 || lastPreviewAt === 0)) {
+          previewCtx.drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
+          lastPreviewAt = clamped;
+        }
+        if (clamped - lastProgressAt >= 0.25) {
+          onProgress?.((clamped / duration) * 85, "rendering");
+          lastProgressAt = clamped;
+        }
+      };
+      stopClock = createFrameClock(Math.min(fps, 30), tick);
+      tick();
+    });
+  } catch (err) {
+    if ((recorder.state as RecordingState) !== "inactive") {
       recorder.stop();
-    } catch {
-      /* already stopped — some browsers race here */
     }
+    try {
+      narrationSource.stop();
+      musicSource?.stop();
+    } catch {
+      /* já parou */
+    }
+    void audioCtx.close();
+    throw err;
   }
 
+  // pequeno respiro para o último chunk
+  await new Promise((r) => setTimeout(r, 250));
+  if ((recorder.state as RecordingState) !== "inactive") recorder.stop();
   try {
     narrationSource.stop();
     musicSource?.stop();
   } catch {
     /* já parou */
   }
-
-  // Wait for the MediaRecorder onstop event to fire and produce the final Blob.
-  // Add a safety timeout: if onstop never fires (rare browser bug), we still
-  // continue with whatever chunks were collected.
-  const recordedBlob = await Promise.race([
-    finished,
-    new Promise<Blob>((resolve) =>
-      setTimeout(() => {
-        console.warn(
-          "[render] MediaRecorder.onstop not fired within timeout — using collected chunks.",
-        );
-        resolve(new Blob(chunks, { type: mimeType || "video/webm" }));
-      }, 3000),
-    ),
-  ]);
+  const recordedBlob = await finished;
   void audioCtx.close();
 
-  if (recordedBlob.size === 0) {
-    throw new Error(
-      "A gravação resultou em um arquivo vazio. Tente novamente ou use um navegador diferente.",
-    );
-  }
-
-  // ---------- Transcode to MP4 (or return WebM) ----------
   if ((options.format || "mp4") === "mp4") {
-    onProgress?.(85, "encoding", "Iniciando transcodificação no servidor FFmpeg...");
+    onProgress?.(85, "encoding");
     try {
-      // 1. Tenta conversão no SERVIDOR via FFmpeg nativo (ultrafast, multicore real e polling de progresso)
-      const mp4 = await transcodeViaServer(
-        recordedBlob,
-        fps,
-        duration,
-        (value, label) => onProgress?.(85 + value * 15, "encoding", label),
+      const mp4 = await transcodeWebMToMp4(recordedBlob, fps, duration, (value) =>
+        onProgress?.(85 + value * 15, "encoding"),
       );
-      onProgress?.(100, "encoding", "Vídeo pronto para download!");
+      onProgress?.(100, "encoding");
       return { blob: mp4, mimeType: "video/mp4", extension: "mp4", duration };
-    } catch (serverErr) {
-      console.warn("[render] Conversão no servidor indisponível ou falhou:", serverErr);
-
-      // 2. Se for um vídeo curto (até 30s), tenta FFmpeg WASM no navegador
-      if (duration <= 30) {
-        try {
-          const mp4 = await transcodeWebMToMp4(recordedBlob, fps, (value) =>
-            onProgress?.(85 + value * 15, "encoding", `Codificando no navegador (${Math.round(value * 100)}%)...`),
-          );
-          onProgress?.(100, "encoding", "Vídeo pronto!");
-          return { blob: mp4, mimeType: "video/mp4", extension: "mp4", duration };
-        } catch (wasmErr) {
-          console.warn("[render] Fallback WASM também falhou:", wasmErr);
-        }
-      }
-
-      // 3. Fallback seguro para WebM: o usuário NUNCA perde o vídeo gerado
-      console.info("[render] Retornando vídeo gravado em WebM.");
-      onProgress?.(100, "encoding", "Finalizado em formato WebM!");
-      return {
-        blob: recordedBlob,
-        mimeType: mimeType || "video/webm",
-        extension: "webm",
-        duration,
-      };
+    } catch (err) {
+      console.warn("Transcodificação FFmpeg falhou ou excedeu memória. Retornando gravação original:", err);
+      onProgress?.(100, "encoding");
+      return { blob: recordedBlob, mimeType: "video/webm", extension: "webm", duration };
     }
   }
 
-  onProgress?.(100, "encoding", "Vídeo pronto!");
+  onProgress?.(100, "encoding");
   return { blob: recordedBlob, mimeType: mimeType || "video/webm", extension: "webm", duration };
 }
