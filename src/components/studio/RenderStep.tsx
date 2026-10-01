@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import {
   Download,
   Play,
@@ -53,6 +53,18 @@ export function RenderStep() {
   const previewRef = useRef<HTMLCanvasElement>(null);
   const cancelRef = useRef({ cancelled: false });
   const [renderStage, setRenderStage] = useState<"rendering" | "encoding">("rendering");
+  const [stageLabel, setStageLabel] = useState<string>("");
+  const [serverFfmpeg, setServerFfmpeg] = useState<{
+    available: boolean;
+    version?: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/transcode/status")
+      .then((r) => r.json())
+      .then((data) => setServerFfmpeg(data))
+      .catch(() => setServerFfmpeg({ available: false }));
+  }, []);
 
   // Validação dos requisitos para renderização
   const hasScript = Boolean(script.trim());
@@ -88,9 +100,10 @@ export function RenderStep() {
         fade: Math.min(0.6, perImage / 4),
         format: preferredFormat,
         previewCanvas: previewRef.current,
-        onProgress: (value, stage) => {
+        onProgress: (value, stage, label) => {
           setProgress(value);
           setRenderStage(stage);
+          if (label) setStageLabel(label);
         },
         cancelRef: cancelRef.current,
       });
@@ -101,6 +114,14 @@ export function RenderStep() {
         size: out.blob.size,
       });
       setProgress(100);
+
+      // Notify user if we fell back from MP4 to WebM
+      if (preferredFormat === "mp4" && out.extension === "webm") {
+        setError(
+          "A conversão para MP4 não foi possível neste navegador. " +
+            "O vídeo foi salvo em WebM (compatível com o YouTube).",
+        );
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Falha ao montar o vídeo.");
     } finally {
@@ -189,7 +210,19 @@ export function RenderStep() {
       {/* Opções de Vídeo e Formato */}
       <div className="grid gap-x-6 gap-y-5 sm:grid-cols-2">
         <div className="min-w-0">
-          <Label className="text-xs text-muted-foreground">Formato de Saída</Label>
+          <div className="flex items-center justify-between">
+            <Label className="text-xs text-muted-foreground">Formato de Saída</Label>
+            {serverFfmpeg?.available ? (
+              <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-400 border border-emerald-500/20">
+                <CheckCircle2 className="size-3 text-emerald-400" />
+                FFmpeg Nativo Ativo
+              </span>
+            ) : serverFfmpeg !== null ? (
+              <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400 border border-amber-500/20">
+                WASM Navegador
+              </span>
+            ) : null}
+          </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
             <Button
               size="sm"
@@ -306,21 +339,25 @@ export function RenderStep() {
         <div className="mt-4 rounded-xl border border-border bg-card/60 p-4">
           <div className="flex justify-between text-xs mb-2">
             <span className="font-semibold flex items-center gap-1.5 text-primary">
-              <Sparkles className="size-3.5 animate-pulse" />
-              {renderStage === "rendering"
-                ? `Montando vídeo frame a frame (${Math.round(progress)}%)`
-                : `Codificando H.264/AAC e corrigindo a timeline (${Math.round(progress)}%)`}
+              <Sparkles className="size-3.5 animate-pulse shrink-0" />
+              <span className="truncate">
+                {stageLabel ||
+                  (renderStage === "rendering"
+                    ? `Montando vídeo frame a frame (${Math.round(progress)}%)`
+                    : `Codificando no servidor FFmpeg (${Math.round(progress)}%)`)}
+              </span>
             </span>
-            <span className="text-muted-foreground font-mono">
+            <span className="text-muted-foreground font-mono shrink-0 ml-2">
               {renderStage === "rendering"
                 ? `${formatTime((progress / 85) * duration)} / ${formatTime(duration)}`
-                : "Finalizando MP4"}
+                : `${Math.round(progress)}%`}
             </span>
           </div>
           <Progress value={progress} />
           <p className="mt-2 text-[11px] text-muted-foreground">
-            A captura usa um relógio dedicado e o MP4 é normalizado pelo FFmpeg. Não feche esta aba
-            até a conclusão.
+            {renderStage === "rendering"
+              ? "A captura grava o canvas com sincronização de áudio e legendas em tempo real."
+              : "Transcodificação com FFmpeg nativo multicore no servidor. Converte em segundos sem travar o navegador."}
           </p>
         </div>
       )}

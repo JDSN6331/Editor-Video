@@ -29,7 +29,9 @@ export class FFmpeg {
                 switch (type) {
                     case FFMessageType.LOAD:
                         this.loaded = true;
-                        this.#resolves[id](data);
+                        if (this.#resolves[id]) this.#resolves[id](data);
+                        delete this.#resolves[id];
+                        delete this.#rejects[id];
                         break;
                     case FFMessageType.MOUNT:
                     case FFMessageType.UNMOUNT:
@@ -42,20 +44,36 @@ export class FFmpeg {
                     case FFMessageType.CREATE_DIR:
                     case FFMessageType.LIST_DIR:
                     case FFMessageType.DELETE_DIR:
-                        this.#resolves[id](data);
+                        if (this.#resolves[id]) this.#resolves[id](data);
+                        delete this.#resolves[id];
+                        delete this.#rejects[id];
                         break;
                     case FFMessageType.LOG:
                         this.#logEventCallbacks.forEach((f) => f(data));
+                        // LOG messages are fire-and-forget — do NOT delete
+                        // resolves/rejects as they belong to other pending commands.
                         break;
                     case FFMessageType.PROGRESS:
                         this.#progressEventCallbacks.forEach((f) => f(data));
+                        // PROGRESS messages are fire-and-forget — do NOT delete
+                        // resolves/rejects as they belong to other pending commands.
                         break;
                     case FFMessageType.ERROR:
-                        this.#rejects[id](data);
+                        if (this.#rejects[id]) this.#rejects[id](data);
+                        delete this.#resolves[id];
+                        delete this.#rejects[id];
                         break;
                 }
-                delete this.#resolves[id];
-                delete this.#rejects[id];
+            };
+            this.#worker.onerror = (event) => {
+                const ids = Object.keys(this.#rejects);
+                for (const id of ids) {
+                    if (this.#rejects[id]) {
+                        this.#rejects[id](new Error(event?.message || "FFmpeg Worker falhou ou foi encerrado pelo navegador."));
+                    }
+                    delete this.#resolves[id];
+                    delete this.#rejects[id];
+                }
             };
         }
     };
@@ -213,7 +231,11 @@ export class FFmpeg {
     writeFile = (path, data, { signal } = {}) => {
         const trans = [];
         if (data instanceof Uint8Array) {
-            trans.push(data.buffer);
+            // Copy the buffer before transferring so the caller's
+            // Uint8Array remains valid after postMessage.
+            const copy = data.buffer.slice(0);
+            data = new Uint8Array(copy);
+            trans.push(copy);
         }
         return this.#send({
             type: FFMessageType.WRITE_FILE,

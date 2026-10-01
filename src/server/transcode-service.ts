@@ -1,0 +1,456 @@
+import { spawn, execSync } from "node:child_process";
+import { createReadStream, createWriteStream, existsSync, promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { pipeline } from "node:stream/promises";
+
+let cachedFfmpegPath: string | null = null;
+let ffmpegChecked = false;
+
+export interface TranscodeJobProgress {
+  status: "uploading" | "encoding" | "done" | "error";
+  timeSec: number;
+  fps: number;
+  speed: string;
+  error?: string;
+}
+
+export const activeJobs = new Map<string, TranscodeJobProgress>();
+
+/**
+ * Localiza o executável nativo do FFmpeg no sistema operacional
+ * (compatível com Windows local e Linux VPS / Docker / Easypanel).
+ */
+export function getFfmpegPath(): string | null {
+  if (ffmpegChecked) return cachedFfmpegPath;
+
+  // 1. Variável de ambiente explícita
+  if (process.env.FFMPEG_PATH && existsSync(process.env.FFMPEG_PATH)) {
+    cachedFfmpegPath = process.env.FFMPEG_PATH;
+    ffmpegChecked = true;
+    return cachedFfmpegPath;
+  }
+
+  // 2. Busca no PATH ou caminhos comuns por SO
+  try {
+    if (process.platform === "win32") {
+      const wingetPath = path.join(
+        process.env.LOCALAPPDATA || "",
+        "Microsoft",
+        "WinGet",
+        "Links",
+        "ffmpeg.exe",
+      );
+      if (existsSync(wingetPath)) {
+        cachedFfmpegPath = wingetPath;
+        ffmpegChecked = true;
+        return cachedFfmpegPath;
+      }
+
+      const out = execSync("where ffmpeg", { stdio: ["ignore", "pipe", "ignore"] })
+        .toString()
+        .trim()
+        .split("\r\n")[0];
+      if (out && existsSync(out)) {
+        cachedFfmpegPath = out;
+        ffmpegChecked = true;
+        return cachedFfmpegPath;
+      }
+    } else {
+      const out = execSync("which ffmpeg || command -v ffmpeg", {
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .toString()
+        .trim();
+      if (out && existsSync(out)) {
+        cachedFfmpegPath = out;
+        ffmpegChecked = true;
+        return cachedFfmpegPath;
+      }
+    }
+  } catch {
+    // FFmpeg não encontrado diretamente
+  }
+
+  // 3. Fallback: tentar chamar diretamente "ffmpeg"
+  try {
+    execSync("ffmpeg -version", { stdio: "ignore" });
+    cachedFfmpegPath = "ffmpeg";
+    ffmpegChecked = true;
+    return cachedFfmpegPath;
+  } catch {
+    cachedFfmpegPath = null;
+    ffmpegChecked = true;
+    return null;
+  }
+}
+
+export function isFfmpegAvailable(): boolean {
+  return getFfmpegPath() !== null;
+}
+
+export function getFfmpegVersion(): string {
+  const binary = getFfmpegPath();
+  if (!binary) return "Não disponível";
+  try {
+    const out = execSync(`"${binary}" -version`, {
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .split("\n")[0];
+    return out.trim();
+  } catch {
+    return "Desconhecido";
+  }
+}
+
+function parseFfmpegTime(timeStr: string): number {
+  const parts = timeStr.trim().split(":");
+  if (parts.length === 3) {
+    const hours = parseFloat(parts[0]) || 0;
+    const minutes = parseFloat(parts[1]) || 0;
+    const seconds = parseFloat(parts[2]) || 0;
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+  return 0;
+}
+
+/**
+ * Transcodifica um arquivo WebM para MP4 usando o binário nativo do FFmpeg.
+ * Utiliza o preset ultrafast com multicore real (threads 0) e relata o progresso
+ * segundo a segundo para a interface do usuário.
+ */
+export async function transcodeWebMToMp4Server(
+  inputPath: string,
+  outputPath: string,
+  fps = 30,
+  onProgress?: (info: { timeSec: number; fps: number; speed: string }) => void,
+): Promise<void> {
+  const binary = getFfmpegPath();
+  if (!binary) {
+    throw new Error(
+      "FFmpeg nativo não está instalado ou acessível no servidor.",
+    );
+  }
+
+  // Argumentos otimizados para máxima performance e compatibilidade
+  const args = [
+    "-y",
+    "-fflags",
+    "+genpts+discardcorrupt",
+    "-i",
+    inputPath,
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a?",
+    "-vf",
+    `fps=${fps}`,
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-crf",
+    "22",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
+    "-threads",
+    "0",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ];
+
+  return new Promise<void>((resolve, reject) => {
+    console.log(`[FFmpeg] Iniciando transcodificação: ${inputPath} -> ${outputPath}`);
+    const proc = spawn(binary, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+
+    proc.stderr?.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+
+      // Extrai tempo, fps e velocidade em tempo real
+      const timeMatch = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d{2})/);
+      const fpsMatch = text.match(/fps=\s*([\d.]+)/);
+      const speedMatch = text.match(/speed=\s*([\d.]+x)/);
+
+      if (timeMatch) {
+        const timeSec = parseFfmpegTime(timeMatch[1]);
+        const currentFps = fpsMatch ? parseFloat(fpsMatch[1]) : 0;
+        const currentSpeed = speedMatch ? speedMatch[1] : "1x";
+        onProgress?.({ timeSec, fps: currentFps, speed: currentSpeed });
+      }
+    });
+
+    proc.on("error", (err) => {
+      console.error("[FFmpeg] Erro ao iniciar processo:", err);
+      reject(new Error(`Falha ao iniciar processo do FFmpeg: ${err.message}`));
+    });
+
+    proc.on("close", (code) => {
+      if (code === 0) {
+        console.log(`[FFmpeg] Transcodificação concluída com sucesso!`);
+        resolve();
+      } else {
+        const lastLines = stderr.split("\n").slice(-8).join("\n");
+        console.error(`[FFmpeg] Falha com código ${code}:`, lastLines);
+        reject(
+          new Error(`FFmpeg falhou com código ${code}:\n${lastLines}`),
+        );
+      }
+    });
+  });
+}
+
+/**
+ * Middleware para servidor de desenvolvimento (Vite dev server / Node HTTP).
+ */
+export async function handleNodeTranscodeMiddleware(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
+
+  // Endpoint de status geral
+  if (url.pathname === "/api/transcode/status" && req.method === "GET") {
+    const available = isFfmpegAvailable();
+    const version = available ? getFfmpegVersion() : null;
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(JSON.stringify({ available, version, platform: process.platform }));
+    return;
+  }
+
+  // Endpoint de consulta de progresso do job ativo
+  if (url.pathname === "/api/transcode/progress" && req.method === "GET") {
+    const id = url.searchParams.get("id");
+    const job = id ? activeJobs.get(id) : null;
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(JSON.stringify(job || { status: "not_found" }));
+    return;
+  }
+
+  // Endpoint de transcodificação
+  if (url.pathname === "/api/transcode" && req.method === "POST") {
+    if (!isFfmpegAvailable()) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: "FFmpeg não está disponível no servidor.",
+        }),
+      );
+      return;
+    }
+
+    const id = url.searchParams.get("id") || randomUUID();
+    const fps = parseInt(url.searchParams.get("fps") || "30", 10) || 30;
+    const tempDir = os.tmpdir();
+    const inputPath = path.join(tempDir, `video-in-${id}.webm`);
+    const outputPath = path.join(tempDir, `video-out-${id}.mp4`);
+
+    activeJobs.set(id, {
+      status: "uploading",
+      timeSec: 0,
+      fps: 0,
+      speed: "0x",
+    });
+
+    try {
+      console.log(`[transcode-service] Recebendo upload do vídeo job=${id}...`);
+      const writeStream = createWriteStream(inputPath);
+      await pipeline(req, writeStream);
+
+      const stat = await fs.stat(inputPath);
+      console.log(
+        `[transcode-service] Upload concluído! Tamanho: ${(stat.size / 1024 / 1024).toFixed(1)} MB. Iniciando FFmpeg...`,
+      );
+
+      activeJobs.set(id, {
+        status: "encoding",
+        timeSec: 0,
+        fps: 0,
+        speed: "1x",
+      });
+
+      // Executa FFmpeg nativo com relatório de progresso
+      await transcodeWebMToMp4Server(inputPath, outputPath, fps, (info) => {
+        const job = activeJobs.get(id);
+        if (job) {
+          job.timeSec = info.timeSec;
+          job.fps = info.fps;
+          job.speed = info.speed;
+        }
+      });
+
+      activeJobs.set(id, {
+        status: "done",
+        timeSec: 0,
+        fps: 0,
+        speed: "1x",
+      });
+
+      // Lê o MP4 e envia como resposta
+      const outStat = await fs.stat(outputPath);
+      res.writeHead(200, {
+        "Content-Type": "video/mp4",
+        "Content-Length": outStat.size,
+        "Content-Disposition": `attachment; filename="video-${Date.now()}.mp4"`,
+        "Access-Control-Allow-Origin": "*",
+      });
+
+      const readStream = createReadStream(outputPath);
+      await pipeline(readStream, res);
+      console.log(`[transcode-service] MP4 entregue com sucesso para o cliente!`);
+    } catch (err) {
+      console.error("[transcode-service] Erro na transcodificação:", err);
+      const errMsg = err instanceof Error ? err.message : "Erro desconhecido na conversão.";
+      activeJobs.set(id, {
+        status: "error",
+        timeSec: 0,
+        fps: 0,
+        speed: "0x",
+        error: errMsg,
+      });
+
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: errMsg }));
+      }
+    } finally {
+      // Limpeza garantida dos arquivos temporários
+      setTimeout(() => {
+        activeJobs.delete(id);
+      }, 10000);
+
+      await Promise.allSettled([
+        fs.unlink(inputPath).catch(() => {}),
+        fs.unlink(outputPath).catch(() => {}),
+      ]);
+    }
+    return;
+  }
+
+  res.writeHead(404, { "Content-Type": "text/plain" });
+  res.end("Not Found");
+}
+
+/**
+ * Handlers para ambiente Web Request / Response (usados no Nitro / SSR em produção).
+ */
+export async function handleFetchTranscodeStatus(): Promise<Response> {
+  const available = isFfmpegAvailable();
+  const version = available ? getFfmpegVersion() : null;
+  return new Response(
+    JSON.stringify({ available, version, platform: process.platform }),
+    {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    },
+  );
+}
+
+export async function handleFetchTranscodeProgress(url: URL): Promise<Response> {
+  const id = url.searchParams.get("id");
+  const job = id ? activeJobs.get(id) : null;
+  return new Response(JSON.stringify(job || { status: "not_found" }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
+export async function handleFetchTranscode(request: Request): Promise<Response> {
+  if (!isFfmpegAvailable()) {
+    return new Response(
+      JSON.stringify({ error: "FFmpeg não está disponível no servidor." }),
+      { status: 503, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  const url = new URL(request.url);
+  const id = url.searchParams.get("id") || randomUUID();
+  const fps = parseInt(url.searchParams.get("fps") || "30", 10) || 30;
+  const tempDir = os.tmpdir();
+  const inputPath = path.join(tempDir, `video-in-${id}.webm`);
+  const outputPath = path.join(tempDir, `video-out-${id}.mp4`);
+
+  activeJobs.set(id, {
+    status: "uploading",
+    timeSec: 0,
+    fps: 0,
+    speed: "0x",
+  });
+
+  try {
+    const arrayBuffer = await request.arrayBuffer();
+    await fs.writeFile(inputPath, Buffer.from(arrayBuffer));
+
+    activeJobs.set(id, {
+      status: "encoding",
+      timeSec: 0,
+      fps: 0,
+      speed: "1x",
+    });
+
+    await transcodeWebMToMp4Server(inputPath, outputPath, fps, (info) => {
+      const job = activeJobs.get(id);
+      if (job) {
+        job.timeSec = info.timeSec;
+        job.fps = info.fps;
+        job.speed = info.speed;
+      }
+    });
+
+    activeJobs.set(id, {
+      status: "done",
+      timeSec: 0,
+      fps: 0,
+      speed: "1x",
+    });
+
+    const fileBuffer = await fs.readFile(outputPath);
+    return new Response(fileBuffer, {
+      status: 200,
+      headers: {
+        "Content-Type": "video/mp4",
+        "Content-Length": fileBuffer.length.toString(),
+        "Content-Disposition": `attachment; filename="video-${Date.now()}.mp4"`,
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  } catch (err) {
+    console.error("[transcode-service] Erro no handleFetchTranscode:", err);
+    return new Response(
+      JSON.stringify({
+        error: err instanceof Error ? err.message : "Erro na transcodificação.",
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  } finally {
+    setTimeout(() => {
+      activeJobs.delete(id);
+    }, 10000);
+
+    await Promise.allSettled([
+      fs.unlink(inputPath).catch(() => {}),
+      fs.unlink(outputPath).catch(() => {}),
+    ]);
+  }
+}
