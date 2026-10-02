@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Download,
   Play,
@@ -16,6 +16,7 @@ import { Progress } from "@/components/ui/progress";
 import { useVideoProject } from "@/contexts/VideoProjectContext";
 import { formatTime } from "@/lib/video/captions";
 import { renderVideoOnServer } from "@/lib/video/server-render";
+import { drawFrame } from "@/lib/video/draw";
 import { VIDEO_PRESETS, type PresetKey } from "@/lib/video/types";
 import { downloadBlob } from "@/lib/utils";
 import { GoogleDriveUpload } from "./GoogleDriveUpload";
@@ -54,6 +55,28 @@ export function RenderStep() {
   const previewRef = useRef<HTMLCanvasElement>(null);
   const cancelRef = useRef({ cancelled: false });
   const [renderStage, setRenderStage] = useState<"rendering" | "encoding">("rendering");
+
+  // O preview é apenas uma amostra visual leve. A exportação completa continua
+  // sendo feita exclusivamente pelo FFmpeg nativo no servidor.
+  useEffect(() => {
+    const canvas = previewRef.current;
+    if (!canvas || result || !images.length || duration <= 0) return;
+    const { width, height } = VIDEO_PRESETS[preset];
+    canvas.width = Math.round(width / 2);
+    canvas.height = Math.round(height / 2);
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    drawFrame(
+      context,
+      images.map((image) => image.element),
+      0,
+      duration,
+      canvas.width,
+      canvas.height,
+      showCaptions ? captions : null,
+      { kenBurns, fade: Math.min(0.6, perImage / 4) },
+    );
+  }, [captions, duration, images, kenBurns, perImage, preset, result, showCaptions]);
 
   // Validação dos requisitos para renderização
   const hasScript = Boolean(script.trim());

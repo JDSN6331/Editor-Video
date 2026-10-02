@@ -138,10 +138,11 @@ async function runFfmpeg(args: string[], jobId: string): Promise<void> {
     proc.stderr.on("data", (chunk) => {
       const text = chunk.toString();
       stderr = (stderr + text).slice(-16000);
-      const match = text.match(/time=(\d{2}:\d{2}:\d{2}(?:\.\d+)?)/);
-      if (match?.[1]) {
+      const matches = [...text.matchAll(/time=(\d{2}:\d{2}:\d{2}(?:\.\d+)?)/g)];
+      const latestTime = matches.at(-1)?.[1];
+      if (latestTime) {
         const job = activeJobs.get(jobId);
-        if (job) job.timeSec = parseTime(match[1]);
+        if (job) job.timeSec = Math.max(job.timeSec, parseTime(latestTime));
       }
     });
     proc.on("error", (error) => reject(new Error(`Falha ao iniciar FFmpeg: ${error.message}`)));
