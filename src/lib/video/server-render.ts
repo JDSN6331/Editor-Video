@@ -14,7 +14,7 @@ interface ServerRenderOptions {
   kenBurns: boolean;
   fade: number;
   format: "mp4" | "webm";
-  onProgress?: (progress: number) => void;
+  onProgress?: (progress: number, stage: "uploading" | "encoding") => void;
   cancelRef?: { cancelled: boolean };
 }
 
@@ -25,6 +25,7 @@ interface RenderProgress {
 }
 
 const API_BASE = String(import.meta.env.VITE_TRANSCODE_API_URL || "").replace(/\/$/, "");
+const UPLOAD_TIMEOUT_MS = 2 * 60 * 1000;
 
 async function sourceToBlob(source: string): Promise<Blob> {
   const response = await fetch(source);
@@ -39,6 +40,53 @@ async function responseError(response: Response): Promise<string> {
   } catch {
     return `O servidor respondeu com HTTP ${response.status}.`;
   }
+}
+
+function uploadRenderForm(
+  url: string,
+  form: FormData,
+  onProgress?: (progress: number, stage: "uploading" | "encoding") => void,
+  cancelRef?: { cancelled: boolean },
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.responseType = "json";
+    xhr.timeout = UPLOAD_TIMEOUT_MS;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress?.(Math.min(0.1, (event.loaded / event.total) * 0.1), "uploading");
+      }
+    };
+
+    const cancelTimer = window.setInterval(() => {
+      if (cancelRef?.cancelled) xhr.abort();
+    }, 200);
+    const finish = () => window.clearInterval(cancelTimer);
+    xhr.onload = () => {
+      finish();
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(0.1, "uploading");
+        resolve();
+        return;
+      }
+      const payload = (xhr.response || {}) as { error?: string };
+      reject(new Error(payload.error || `O servidor respondeu com HTTP ${xhr.status}.`));
+    };
+    xhr.onerror = () => {
+      finish();
+      reject(new Error("Falha de conexão durante o envio das mídias."));
+    };
+    xhr.ontimeout = () => {
+      finish();
+      reject(new Error("O envio excedeu 2 minutos. Verifique o proxy do Easypanel."));
+    };
+    xhr.onabort = () => {
+      finish();
+      reject(new Error("CANCELLED"));
+    };
+    xhr.send(form);
+  });
 }
 
 export async function renderVideoOnServer(options: ServerRenderOptions): Promise<Blob> {
@@ -80,12 +128,12 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
   }
 
   try {
-    options.onProgress?.(0.02);
-    const startResponse = await fetch(`${API_BASE}/api/render/start?id=${encodeURIComponent(id)}`, {
-      method: "POST",
-      body: form,
-    });
-    if (!startResponse.ok) throw new Error(await responseError(startResponse));
+    await uploadRenderForm(
+      `${API_BASE}/api/render/start?id=${encodeURIComponent(id)}`,
+      form,
+      options.onProgress,
+      options.cancelRef,
+    );
 
     while (true) {
       if (options.cancelRef?.cancelled) {
@@ -105,7 +153,8 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
       if (progress.status === "error") throw new Error(progress.error || "Falha na montagem.");
       if (progress.status === "encoding" && options.duration > 0) {
         options.onProgress?.(
-          Math.max(0.05, Math.min(0.99, (progress.timeSec || 0) / options.duration)),
+          0.1 + Math.min(0.89, ((progress.timeSec || 0) / options.duration) * 0.89),
+          "encoding",
         );
       }
       if (progress.status === "done") {
@@ -117,7 +166,7 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
           if (resultResponse.ok) {
             const blob = await resultResponse.blob();
             if (!blob.size) throw new Error("O servidor retornou um vídeo vazio.");
-            options.onProgress?.(1);
+            options.onProgress?.(1, "encoding");
             return blob;
           }
           await new Promise((resolve) => window.setTimeout(resolve, 300));
