@@ -76,7 +76,7 @@ export function RenderStep() {
     try {
       const { width, height } = VIDEO_PRESETS[preset];
       const out = await renderVideo({
-        images: images.map((i) => i.element),
+        images: images.map((image) => image.element),
         narrationBuffer: narration.buffer,
         musicBuffer: music?.buffer ?? null,
         musicVolume: effectiveMusicVolume,
@@ -132,12 +132,12 @@ export function RenderStep() {
             <div
               className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 ${
                 hasScript
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                  ? "border-primary/30 bg-primary/10 text-primary"
                   : "border-border bg-background/50 text-muted-foreground"
               }`}
             >
               {hasScript ? (
-                <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
+                <CheckCircle2 className="size-3.5 text-primary shrink-0" />
               ) : (
                 <span className="size-1.5 rounded-full bg-muted-foreground shrink-0" />
               )}
@@ -147,12 +147,12 @@ export function RenderStep() {
             <div
               className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 ${
                 hasImages
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                  ? "border-primary/30 bg-primary/10 text-primary"
                   : "border-border bg-background/50 text-muted-foreground"
               }`}
             >
               {hasImages ? (
-                <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
+                <CheckCircle2 className="size-3.5 text-primary shrink-0" />
               ) : (
                 <span className="size-1.5 rounded-full bg-amber-500 shrink-0" />
               )}
@@ -162,12 +162,12 @@ export function RenderStep() {
             <div
               className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 ${
                 hasNarration
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                  ? "border-primary/30 bg-primary/10 text-primary"
                   : "border-border bg-background/50 text-muted-foreground"
               }`}
             >
               {hasNarration ? (
-                <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
+                <CheckCircle2 className="size-3.5 text-primary shrink-0" />
               ) : (
                 <span className="size-1.5 rounded-full bg-amber-500 shrink-0" />
               )}
@@ -179,7 +179,7 @@ export function RenderStep() {
 
       {/* Opções de Vídeo e Formato */}
       {isReadyToRender && (
-        <div className="mb-5 grid gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-xs sm:grid-cols-3">
+        <div className="mb-5 grid gap-2 rounded-xl border border-primary/30 bg-primary/10 p-4 text-xs sm:grid-cols-3">
           <span>
             <strong>{readyImageCount}</strong> de <strong>{images.length}</strong> imagens prontas
           </span>
@@ -289,7 +289,7 @@ export function RenderStep() {
         {result && (
           <Button
             variant="secondary"
-            className="gap-2 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/30"
+            className="gap-2 border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20"
             onClick={() =>
               fetch(result.url)
                 .then((r) => r.blob())
@@ -323,8 +323,8 @@ export function RenderStep() {
             <span className="font-semibold flex items-center gap-1.5 text-primary">
               <Sparkles className="size-3.5 animate-pulse text-primary" />
               {renderStage === "rendering"
-                ? `Etapa 1/2: Gravando vídeo e áudio (${Math.round((progress / 85) * 100)}%)`
-                : `Etapa 2/2: Finalizando MP4 fluido e timeline (${Math.round(
+                ? `Etapa 1/2: Montando vídeo e áudio (${Math.round((progress / 85) * 100)}%)`
+                : `Etapa 2/2: Finalizando MP4 no FFmpeg do servidor (${Math.round(
                     Math.max(0, Math.min(100, ((progress - 85) / 15) * 100)),
                   )}%)`}
             </span>
@@ -339,8 +339,8 @@ export function RenderStep() {
           <Progress value={progress} className="h-2.5" />
           <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
             {renderStage === "rendering"
-              ? "Desenhando cada quadro com animação, legendas e mixando trilha sonora..."
-              : "Codificando em H.264/AAC com taxa constante de quadros (sem travamentos) e gerando cabeçalho FastStart para busca rápida na timeline."}
+              ? "Desenhando os quadros, aplicando as legendas sincronizadas e mixando o áudio..."
+              : "Codificando em H.264/AAC com o FFmpeg nativo do servidor local."}
           </p>
         </div>
       )}
@@ -358,9 +358,7 @@ export function RenderStep() {
           ref={previewRef}
           className={`w-full h-full object-contain ${result ? "hidden" : "block"}`}
         />
-        {result && (
-          <video src={result.url} controls className="w-full h-full object-contain" />
-        )}
+        {result && <video src={result.url} controls className="w-full h-full object-contain" />}
       </div>
     </StepCard>
   );

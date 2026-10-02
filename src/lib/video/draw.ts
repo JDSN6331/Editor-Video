@@ -8,14 +8,37 @@ export function drawCover(
   h: number,
   zoom = 1,
   alpha = 1,
-) {
-  const ratio = Math.max(w / img.width, h / img.height) * zoom;
-  const dw = img.width * ratio;
-  const dh = img.height * ratio;
+): boolean {
+  const imageWidth = img.naturalWidth || img.width;
+  const imageHeight = img.naturalHeight || img.height;
+  if (
+    !img.complete ||
+    imageWidth <= 0 ||
+    imageHeight <= 0 ||
+    !Number.isFinite(w) ||
+    !Number.isFinite(h) ||
+    w <= 0 ||
+    h <= 0
+  ) {
+    return false;
+  }
+
+  const ratio = Math.max(w / imageWidth, h / imageHeight) * zoom;
+  const dw = imageWidth * ratio;
+  const dh = imageHeight * ratio;
+  if (![ratio, dw, dh, alpha].every(Number.isFinite)) return false;
+
   ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
-  ctx.restore();
+  try {
+    ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+    ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    return true;
+  } catch (error) {
+    console.warn("Nao foi possivel desenhar uma imagem no preview.", error);
+    return false;
+  } finally {
+    ctx.restore();
+  }
 }
 
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
@@ -126,16 +149,19 @@ export function drawFrame(
   captions: Caption[] | null,
   options: { kenBurns: boolean; fade: number } = { kenBurns: true, fade: 0.6 },
 ) {
+  if (!images.length || !Number.isFinite(duration) || duration <= 0) return;
+  const safeTime = Math.max(0, Math.min(Number.isFinite(t) ? t : 0, duration));
   const perImage = duration / Math.max(1, images.length);
-  const index = Math.min(images.length - 1, Math.floor(t / perImage));
-  const local = t - index * perImage;
+  const index = Math.max(0, Math.min(images.length - 1, Math.floor(safeTime / perImage)));
+  const local = safeTime - index * perImage;
   const progress = perImage > 0 ? local / perImage : 0;
 
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, w, h);
 
   const zoom = options.kenBurns ? 1 + 0.06 * progress : 1;
-  drawCover(ctx, images[index]!, w, h, zoom, 1);
+  const current = images[index];
+  if (current) drawCover(ctx, current, w, h, zoom, 1);
 
   const fade = options.fade;
   const next = images[index + 1];
@@ -145,11 +171,11 @@ export function drawFrame(
   }
 
   if (captions) {
-    const caption = captionAt(captions, t);
+    const caption = captionAt(captions, safeTime);
     if (caption) {
       const captionDuration = Math.max(0.001, caption.end - caption.start);
       drawCaption(ctx, caption.text, w, h, {
-        progress: (t - caption.start) / captionDuration,
+        progress: (safeTime - caption.start) / captionDuration,
       });
     }
   }

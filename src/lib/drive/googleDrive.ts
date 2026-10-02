@@ -238,9 +238,7 @@ export interface UploadOptions {
  * Realiza upload resumível de vídeo (MP4 ou WebM) diretamente para o Google Drive
  * com suporte a arquivos grandes e barra de progresso em tempo real.
  */
-export async function uploadVideoToGoogleDrive(
-  options: UploadOptions,
-): Promise<DriveUploadResult> {
+export async function uploadVideoToGoogleDrive(options: UploadOptions): Promise<DriveUploadResult> {
   const {
     blob,
     fileName,

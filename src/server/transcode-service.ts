@@ -8,6 +8,7 @@ import { pipeline } from "node:stream/promises";
 
 let cachedFfmpegPath: string | null = null;
 let ffmpegChecked = false;
+let ffmpegDiagnostic = "FFmpeg ainda nao foi verificado.";
 
 export interface TranscodeJobProgress {
   status: "uploading" | "encoding" | "done" | "error";
@@ -24,14 +25,28 @@ export const activeJobs = new Map<string, TranscodeJobProgress>();
  * (compatível com Windows local e Linux VPS / Docker / Easypanel).
  */
 export function getFfmpegPath(): string | null {
-  if (ffmpegChecked) return cachedFfmpegPath;
+  if (ffmpegChecked && cachedFfmpegPath) return cachedFfmpegPath;
 
   // 1. Variável de ambiente explícita
   const customFfmpeg = process.env["FFMPEG_PATH"];
   if (customFfmpeg && existsSync(customFfmpeg)) {
     cachedFfmpegPath = customFfmpeg;
     ffmpegChecked = true;
+    ffmpegDiagnostic = `FFmpeg localizado por FFMPEG_PATH: ${customFfmpeg}`;
     return cachedFfmpegPath;
+  }
+
+  // Imagens Linux enxutas nem sempre oferecem `which`, embora o executavel
+  // instalado pelo apt esteja presente em um destes caminhos.
+  if (process.platform !== "win32") {
+    for (const candidate of ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"]) {
+      if (existsSync(candidate)) {
+        cachedFfmpegPath = candidate;
+        ffmpegChecked = true;
+        ffmpegDiagnostic = `FFmpeg localizado em ${candidate}`;
+        return cachedFfmpegPath;
+      }
+    }
   }
 
   // 2. Busca no PATH ou caminhos comuns por SO
@@ -47,6 +62,7 @@ export function getFfmpegPath(): string | null {
       if (existsSync(wingetPath)) {
         cachedFfmpegPath = wingetPath;
         ffmpegChecked = true;
+        ffmpegDiagnostic = `FFmpeg localizado em ${wingetPath}`;
         return cachedFfmpegPath;
       }
 
@@ -57,6 +73,7 @@ export function getFfmpegPath(): string | null {
       if (out && existsSync(out)) {
         cachedFfmpegPath = out;
         ffmpegChecked = true;
+        ffmpegDiagnostic = `FFmpeg localizado em ${out}`;
         return cachedFfmpegPath;
       }
     } else {
@@ -68,6 +85,7 @@ export function getFfmpegPath(): string | null {
       if (out && existsSync(out)) {
         cachedFfmpegPath = out;
         ffmpegChecked = true;
+        ffmpegDiagnostic = `FFmpeg localizado em ${out}`;
         return cachedFfmpegPath;
       }
     }
@@ -80,12 +98,21 @@ export function getFfmpegPath(): string | null {
     execSync("ffmpeg -version", { stdio: "ignore" });
     cachedFfmpegPath = "ffmpeg";
     ffmpegChecked = true;
+    ffmpegDiagnostic = "FFmpeg localizado no PATH do processo.";
     return cachedFfmpegPath;
   } catch {
     cachedFfmpegPath = null;
-    ffmpegChecked = true;
+    // Nao memorize falhas: PATH/volumes podem ser disponibilizados depois que
+    // o processo iniciou (comum em containers e plataformas de deploy).
+    ffmpegChecked = false;
+    ffmpegDiagnostic =
+      "Executavel FFmpeg ausente. Use a imagem Docker do projeto ou configure FFMPEG_PATH.";
     return null;
   }
+}
+
+export function getFfmpegDiagnostic(): string {
+  return ffmpegDiagnostic;
 }
 
 export function isFfmpegAvailable(): boolean {
@@ -118,6 +145,15 @@ function parseFfmpegTime(timeStr: string): number {
   return 0;
 }
 
+function safeJobId(value: string | null): string {
+  return value && /^[a-zA-Z0-9-]{1,64}$/.test(value) ? value : randomUUID();
+}
+
+function safeFps(value: string | null): number {
+  const parsed = Number.parseInt(value || "30", 10);
+  return [24, 30, 60].includes(parsed) ? parsed : 30;
+}
+
 /**
  * Transcodifica um arquivo WebM para MP4 usando o binário nativo do FFmpeg.
  * Utiliza o preset ultrafast com multicore real (threads 0) e relata o progresso
@@ -131,9 +167,7 @@ export async function transcodeWebMToMp4Server(
 ): Promise<void> {
   const binary = getFfmpegPath();
   if (!binary) {
-    throw new Error(
-      "FFmpeg nativo não está instalado ou acessível no servidor.",
-    );
+    throw new Error("FFmpeg nativo não está instalado ou acessível no servidor.");
   }
 
   // Argumentos otimizados para máxima performance e compatibilidade
@@ -202,9 +236,7 @@ export async function transcodeWebMToMp4Server(
       } else {
         const lastLines = stderr.split("\n").slice(-8).join("\n");
         console.error(`[FFmpeg] Falha com código ${code}:`, lastLines);
-        reject(
-          new Error(`FFmpeg falhou com código ${code}:\n${lastLines}`),
-        );
+        reject(new Error(`FFmpeg falhou com código ${code}:\n${lastLines}`));
       }
     });
   });
@@ -255,8 +287,8 @@ export async function handleNodeTranscodeMiddleware(
       return;
     }
 
-    const id = url.searchParams.get("id") || randomUUID();
-    const fps = parseInt(url.searchParams.get("fps") || "30", 10) || 30;
+    const id = safeJobId(url.searchParams.get("id"));
+    const fps = safeFps(url.searchParams.get("fps"));
     const tempDir = os.tmpdir();
     const inputPath = path.join(tempDir, `video-in-${id}.webm`);
     const outputPath = path.join(tempDir, `video-out-${id}.mp4`);
@@ -354,7 +386,12 @@ export async function handleFetchTranscodeStatus(): Promise<Response> {
   const available = isFfmpegAvailable();
   const version = available ? getFfmpegVersion() : null;
   return new Response(
-    JSON.stringify({ available, version, platform: process.platform }),
+    JSON.stringify({
+      available,
+      version,
+      platform: process.platform,
+      diagnostic: getFfmpegDiagnostic(),
+    }),
     {
       status: 200,
       headers: {
@@ -379,15 +416,15 @@ export async function handleFetchTranscodeProgress(url: URL): Promise<Response> 
 
 export async function handleFetchTranscode(request: Request): Promise<Response> {
   if (!isFfmpegAvailable()) {
-    return new Response(
-      JSON.stringify({ error: "FFmpeg não está disponível no servidor." }),
-      { status: 503, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "FFmpeg não está disponível no servidor." }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const url = new URL(request.url);
-  const id = url.searchParams.get("id") || randomUUID();
-  const fps = parseInt(url.searchParams.get("fps") || "30", 10) || 30;
+  const id = safeJobId(url.searchParams.get("id"));
+  const fps = safeFps(url.searchParams.get("fps"));
   const tempDir = os.tmpdir();
   const inputPath = path.join(tempDir, `video-in-${id}.webm`);
   const outputPath = path.join(tempDir, `video-out-${id}.mp4`);
@@ -400,8 +437,18 @@ export async function handleFetchTranscode(request: Request): Promise<Response> 
   });
 
   try {
-    const arrayBuffer = await request.arrayBuffer();
-    await fs.writeFile(inputPath, Buffer.from(arrayBuffer));
+    if (!request.body) throw new Error("O upload do video chegou vazio ao servidor.");
+    const inputFile = await fs.open(inputPath, "w");
+    try {
+      const reader = request.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await inputFile.write(value);
+      }
+    } finally {
+      await inputFile.close();
+    }
 
     activeJobs.set(id, {
       status: "encoding",

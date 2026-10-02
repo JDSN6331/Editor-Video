@@ -24,7 +24,7 @@ export function FileLoadIndicator({ state }: { state: FileLoadProgress }) {
         ) : failed ? (
           <AlertCircle className="size-3.5" />
         ) : (
-          <CheckCircle2 className="size-3.5 text-emerald-500" />
+          <CheckCircle2 className="size-3.5 text-primary" />
         )}
         <span className="flex-1">{state.message}</span>
         <span className="font-mono">{Math.round(state.progress)}%</span>

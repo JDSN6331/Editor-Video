@@ -32,6 +32,10 @@ export function TimelineSidebar() {
   } = useVideoProject();
 
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
+  const playbackStartedAtRef = useRef(0);
+  const playbackOffsetRef = useRef(0);
+  const previewTimeRef = useRef(previewTime);
+  previewTimeRef.current = previewTime;
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const [showFramePreview, setShowFramePreview] = useState(true);
 
@@ -43,43 +47,48 @@ export function TimelineSidebar() {
     if (!ctx) return;
 
     const htmlImages = images.map((i) => i.element);
-    drawFrame(
-      ctx,
-      htmlImages,
-      previewTime,
-      duration,
-      canvas.width,
-      canvas.height,
-      showCaptions ? captions : null,
-      { kenBurns, fade: Math.min(0.6, perImage / 4) },
-    );
+    try {
+      drawFrame(
+        ctx,
+        htmlImages,
+        previewTime,
+        duration,
+        canvas.width,
+        canvas.height,
+        showCaptions ? captions : null,
+        { kenBurns, fade: Math.min(0.6, perImage / 4) },
+      );
+    } catch (error) {
+      // Preview e apenas uma conveniencia visual e nunca deve derrubar o editor.
+      console.warn("Falha ao atualizar o preview da linha do tempo.", error);
+      setIsPlayingPreview(false);
+    }
   }, [previewTime, duration, images, captions, showCaptions, kenBurns, perImage, showFramePreview]);
 
   // Reprodução em tempo real no preview
   useEffect(() => {
-    let animId: number;
-    let lastTime = performance.now();
+    let animId = 0;
+    let cancelled = false;
 
     if (isPlayingPreview) {
+      playbackStartedAtRef.current = performance.now();
+      playbackOffsetRef.current = Math.min(previewTimeRef.current, duration);
       const step = (now: number) => {
-        const delta = (now - lastTime) / 1000;
-        lastTime = now;
-
-        setPreviewTime((prev) => {
-          const next = prev + delta;
-          if (next >= duration) {
-            setIsPlayingPreview(false);
-            return 0;
-          }
-          return next;
-        });
-
+        if (cancelled) return;
+        const next = playbackOffsetRef.current + (now - playbackStartedAtRef.current) / 1000;
+        if (next >= duration) {
+          setPreviewTime(0);
+          setIsPlayingPreview(false);
+          return;
+        }
+        setPreviewTime(next);
         animId = requestAnimationFrame(step);
       };
       animId = requestAnimationFrame(step);
     }
 
     return () => {
+      cancelled = true;
       if (animId) cancelAnimationFrame(animId);
     };
   }, [isPlayingPreview, duration, setPreviewTime]);

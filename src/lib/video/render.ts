@@ -51,14 +51,6 @@ export function pickMimeType(): {
   return { mimeType: "", extension: "webm" };
 }
 
-function createFrameClock(fps: number, onTick: () => void): () => void {
-  // Blob Workers can be silently blocked by browser/content-security policies.
-  // A page timer is less exotic and, combined with requestFrame(), produces a
-  // frame for every tick without depending on requestAnimationFrame visibility.
-  const timer = window.setInterval(onTick, Math.max(16, Math.round(1000 / fps)));
-  return () => window.clearInterval(timer);
-}
-
 export async function decodeAudio(file: File): Promise<AudioBuffer> {
   const Ctx = window.AudioContext || window.webkitAudioContext;
   if (!Ctx) throw new Error("AudioContext não suportado");
@@ -162,12 +154,15 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
   // O primeiro quadro deve existir antes da captura; isso evita gravações congeladas
   // no quadro inicial em implementações mais estritas de captureStream.
   drawFrame(ctx, images, 0, duration, width, height, captions, { kenBurns, fade });
-  const stream = canvas.captureStream(0);
+  // Deixe o navegador amostrar o canvas em cadencia constante. O modo manual
+  // (captureStream(0) + requestFrame em setInterval) produzia timestamps
+  // irregulares e o FFmpeg precisava duplicar quadros, causando stutter.
+  const captureFps = Math.max(1, Math.min(60, fps));
+  const stream = canvas.captureStream(captureFps);
   const videoTrack = stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack | undefined;
   if (!videoTrack) {
     throw new Error("O navegador não criou a faixa de vídeo do canvas.");
   }
-  videoTrack.requestFrame();
   const audioTrack = destination.stream.getAudioTracks()[0];
   if (!audioTrack) {
     throw new Error("O navegador não criou a faixa de áudio da narração.");
@@ -217,36 +212,45 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
   }
 
   const audioStartTime = audioCtx.currentTime + 0.15;
-  const wallStartTime = performance.now() + 150;
   narrationSource.start(audioStartTime);
   musicSource?.start(audioStartTime);
 
   try {
     await new Promise<void>((resolve, reject) => {
-      let stopClock = () => {};
+      let animationFrame = 0;
+      let stopped = false;
+      const stopClock = () => {
+        stopped = true;
+        if (animationFrame) window.cancelAnimationFrame(animationFrame);
+      };
       let lastPreviewAt = 0;
       let lastProgressAt = 0;
       const tick = () => {
+        if (stopped) return;
         if (cancelRef?.cancelled) {
           stopClock();
           reject(new Error("CANCELLED"));
           return;
         }
-        const t = (performance.now() - wallStartTime) / 1000;
+        // O relogio do AudioContext e a fonte da verdade. Assim animacao,
+        // legenda e audio usam exatamente a mesma linha temporal.
+        const t = audioCtx.currentTime - audioStartTime;
         if (t >= duration) {
           stopClock();
           drawFrame(ctx, images, Math.max(0, duration - 0.01), duration, width, height, captions, {
             kenBurns,
             fade,
           });
-          videoTrack.requestFrame();
           resolve();
           return;
         }
         const clamped = Math.max(0, t);
         drawFrame(ctx, images, clamped, duration, width, height, captions, { kenBurns, fade });
-        videoTrack.requestFrame();
-        if (previewCtx && previewCanvas && (clamped - lastPreviewAt >= 0.08 || lastPreviewAt === 0)) {
+        if (
+          previewCtx &&
+          previewCanvas &&
+          (clamped - lastPreviewAt >= 0.08 || lastPreviewAt === 0)
+        ) {
           previewCtx.drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
           lastPreviewAt = clamped;
         }
@@ -254,9 +258,9 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
           onProgress?.((clamped / duration) * 85, "rendering");
           lastProgressAt = clamped;
         }
+        animationFrame = window.requestAnimationFrame(tick);
       };
-      stopClock = createFrameClock(Math.min(fps, 30), tick);
-      tick();
+      animationFrame = window.requestAnimationFrame(tick);
     });
   } catch (err) {
     if ((recorder.state as RecordingState) !== "inactive") {
@@ -292,10 +296,15 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
       );
       onProgress?.(100, "encoding");
       return { blob: mp4, mimeType: "video/mp4", extension: "mp4", duration };
-    } catch (err) {
-      console.warn("Transcodificação FFmpeg falhou ou excedeu memória. Retornando gravação original:", err);
+    } catch (error) {
+      console.warn("FFmpeg nativo indisponivel; entregando o WebM montado.", error);
       onProgress?.(100, "encoding");
-      return { blob: recordedBlob, mimeType: "video/webm", extension: "webm", duration };
+      return {
+        blob: recordedBlob,
+        mimeType: mimeType || "video/webm",
+        extension: "webm",
+        duration,
+      };
     }
   }
 

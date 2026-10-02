@@ -113,7 +113,7 @@ export function analyzeAudioSpeech(
   }
   sampledRms.sort((a, b) => a - b);
   const noiseFloor = sampledRms[Math.floor(sampledRms.length * 0.25)] ?? 0;
-  const speechPeak = sampledRms[Math.floor(sampledRms.length * 0.90)] ?? maxRms;
+  const speechPeak = sampledRms[Math.floor(sampledRms.length * 0.9)] ?? maxRms;
 
   // Limiar adaptativo de fala
   const threshold = Math.max(0.008, noiseFloor + (speechPeak - noiseFloor) * sensitivity);
@@ -183,7 +183,7 @@ export function analyzeAudioSpeech(
     const raw = rawSegments[i];
     if (!raw) continue;
     let start = Math.max(0, (raw.startWindow * windowMs) / 1000 - padSec);
-    let end = Math.min(duration, (raw.endWindow * windowMs) / 1000 + padSec);
+    const end = Math.min(duration, (raw.endWindow * windowMs) / 1000 + padSec);
 
     // Evita sobreposição com segmento anterior
     const lastSeg = segments[segments.length - 1];

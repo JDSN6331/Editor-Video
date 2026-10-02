@@ -50,7 +50,7 @@ function Studio() {
             <ThumbnailStep />
           </div>
 
-          <aside className="space-y-5 lg:sticky lg:top-6 lg:self-start">
+          <aside className="space-y-5 lg:self-start">
             <TimelineSidebar />
             <AboutSidebar />
           </aside>

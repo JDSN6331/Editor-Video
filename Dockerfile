@@ -20,6 +20,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NITRO_PRESET=node-server
 ENV PORT=3000
+ENV HOST=0.0.0.0
 
 # Install native FFmpeg on Debian/Ubuntu
 RUN apt-get update && \

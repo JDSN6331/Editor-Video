@@ -31,7 +31,7 @@ export function StudioHeader() {
               Estúdio de Criação de Vídeo
             </h1>
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Cloud className="size-3.5 text-sky-400" />
+              <Cloud className="size-3.5 text-primary" />
               <span>Upload direto no Google Drive</span>
               <span>•</span>
               <span className="text-muted-foreground/80">Otimizado para o YouTube</span>

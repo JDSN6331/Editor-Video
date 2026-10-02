@@ -249,7 +249,9 @@ export function CaptionsStep() {
 
                     {/* Texto da legenda */}
                     <div className="flex-1 min-w-0">
-                      <p className="text-xs leading-relaxed text-foreground select-text">{c.text}</p>
+                      <p className="text-xs leading-relaxed text-foreground select-text">
+                        {c.text}
+                      </p>
                     </div>
 
                     {/* Ajuste fino rápido (+/- 0.2s) */}
