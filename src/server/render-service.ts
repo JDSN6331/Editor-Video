@@ -409,6 +409,7 @@ export async function handleFetchRenderStart(request: Request): Promise<Response
   cancelledRenderJobs.delete(id);
   completedRenders.delete(id);
 
+  console.log(`[render-upload] job=${id} conexão recebida; processando multipart...`);
   // O multipart é recebido integralmente antes de responder. Depois disso, a
   // renderização fica desacoplada da conexão do navegador.
   const form = await request.formData();
@@ -434,7 +435,10 @@ export async function handleFetchRenderStart(request: Request): Promise<Response
 
   return Response.json(
     { id, status: "accepted" },
-    { status: 202, headers: { "Cache-Control": "no-store" } },
+    {
+      status: 202,
+      headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" },
+    },
   );
 }
 

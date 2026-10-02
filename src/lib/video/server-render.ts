@@ -14,7 +14,7 @@ interface ServerRenderOptions {
   kenBurns: boolean;
   fade: number;
   format: "mp4" | "webm";
-  onProgress?: (progress: number, stage: "uploading" | "encoding") => void;
+  onProgress?: (progress: number, stage: "preparing" | "uploading" | "encoding") => void;
   cancelRef?: { cancelled: boolean };
 }
 
@@ -45,7 +45,7 @@ async function responseError(response: Response): Promise<string> {
 function uploadRenderForm(
   url: string,
   form: FormData,
-  onProgress?: (progress: number, stage: "uploading" | "encoding") => void,
+  onProgress?: (progress: number, stage: "preparing" | "uploading" | "encoding") => void,
   cancelRef?: { cancelled: boolean },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -55,7 +55,7 @@ function uploadRenderForm(
     xhr.timeout = UPLOAD_TIMEOUT_MS;
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && event.total > 0) {
-        onProgress?.(Math.min(0.1, (event.loaded / event.total) * 0.1), "uploading");
+        onProgress?.(0.05 + Math.min(0.1, (event.loaded / event.total) * 0.1), "uploading");
       }
     };
 
@@ -66,7 +66,7 @@ function uploadRenderForm(
     xhr.onload = () => {
       finish();
       if (xhr.status >= 200 && xhr.status < 300) {
-        onProgress?.(0.1, "uploading");
+        onProgress?.(0.15, "uploading");
         resolve();
         return;
       }
@@ -108,23 +108,26 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
   // Campo redundante para parsers multipart/proxies que possam alterar o JSON.
   form.append("duration", String(options.duration));
 
-  const imageBlobs = await Promise.all(
-    options.images.map((image) => sourceToBlob(image.dataUrl || image.url)),
-  );
-  imageBlobs.forEach((blob, index) => {
-    form.append("images", blob, options.images[index]?.name || `image-${index + 1}`);
-  });
-  form.append(
-    "narration",
-    await sourceToBlob(options.narration.dataUrl || options.narration.url),
-    options.narration.name,
-  );
+  const mediaCount = options.images.length + 1 + (options.music ? 1 : 0);
+  let preparedCount = 0;
+  const appendPrepared = () => {
+    preparedCount += 1;
+    options.onProgress?.((preparedCount / mediaCount) * 0.05, "preparing");
+  };
+  for (let index = 0; index < options.images.length; index += 1) {
+    if (options.cancelRef?.cancelled) throw new Error("CANCELLED");
+    const image = options.images[index]!;
+    const blob = await sourceToBlob(image.dataUrl || image.url);
+    form.append("images", blob, image.name || `image-${index + 1}`);
+    appendPrepared();
+  }
+  const narrationBlob = await sourceToBlob(options.narration.dataUrl || options.narration.url);
+  form.append("narration", narrationBlob, options.narration.name);
+  appendPrepared();
   if (options.music) {
-    form.append(
-      "music",
-      await sourceToBlob(options.music.dataUrl || options.music.url),
-      options.music.name,
-    );
+    const musicBlob = await sourceToBlob(options.music.dataUrl || options.music.url);
+    form.append("music", musicBlob, options.music.name);
+    appendPrepared();
   }
 
   try {
@@ -153,7 +156,7 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
       if (progress.status === "error") throw new Error(progress.error || "Falha na montagem.");
       if (progress.status === "encoding" && options.duration > 0) {
         options.onProgress?.(
-          0.1 + Math.min(0.89, ((progress.timeSec || 0) / options.duration) * 0.89),
+          0.15 + Math.min(0.84, ((progress.timeSec || 0) / options.duration) * 0.84),
           "encoding",
         );
       }

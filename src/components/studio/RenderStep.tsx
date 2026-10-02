@@ -55,7 +55,9 @@ export function RenderStep() {
 
   const previewRef = useRef<HTMLCanvasElement>(null);
   const cancelRef = useRef({ cancelled: false });
-  const [renderStage, setRenderStage] = useState<"uploading" | "encoding">("uploading");
+  const [renderStage, setRenderStage] = useState<"preparing" | "uploading" | "encoding">(
+    "preparing",
+  );
   const [liveProgress, setLiveProgress] = useState(0);
 
   // O preview é apenas uma amostra visual leve. A exportação completa continua
@@ -95,7 +97,7 @@ export function RenderStep() {
     setResult(null);
     setProgress(0);
     setLiveProgress(0);
-    setRenderStage("uploading");
+    setRenderStage("preparing");
     setRendering(true);
     cancelRef.current = { cancelled: false };
 
@@ -355,21 +357,27 @@ export function RenderStep() {
           <div className="flex flex-wrap items-center justify-between text-xs mb-2 gap-2">
             <span className="font-semibold flex items-center gap-1.5 text-primary">
               <Sparkles className="size-3.5 animate-pulse text-primary" />
-              {renderStage === "uploading"
-                ? `Enviando mídias ao servidor (${Math.round(displayedProgress)}%)`
-                : `Montando vídeo no FFmpeg do servidor (${Math.round(displayedProgress)}%)`}
+              {renderStage === "preparing"
+                ? `Preparando mídias (${Math.round(displayedProgress)}%)`
+                : renderStage === "uploading"
+                  ? `Enviando mídias ao servidor (${Math.round(displayedProgress)}%)`
+                  : `Montando vídeo no FFmpeg do servidor (${Math.round(displayedProgress)}%)`}
             </span>
             <span className="text-foreground/80 font-mono font-medium text-xs bg-background/80 px-2 py-0.5 rounded border border-border">
-              {renderStage === "uploading"
-                ? "Progresso real do envio"
-                : `${formatTime(Math.min(duration, (Math.max(0, displayedProgress - 10) / 89) * duration))} / ${formatTime(duration)}`}
+              {renderStage === "preparing"
+                ? "Preparação local"
+                : renderStage === "uploading"
+                  ? "Progresso real do envio"
+                  : `${formatTime(Math.min(duration, (Math.max(0, displayedProgress - 15) / 84) * duration))} / ${formatTime(duration)}`}
             </span>
           </div>
           <Progress value={displayedProgress} className="h-2.5" />
           <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
-            {renderStage === "uploading"
-              ? "Enviando imagens, narração, música e legendas. Falhas de rede e timeouts serão informados automaticamente."
-              : "Gerando imagens, legendas e áudio em H.264/AAC no FFmpeg nativo do servidor."}
+            {renderStage === "preparing"
+              ? "Preparando os arquivos no navegador antes de iniciar a conexão com o servidor."
+              : renderStage === "uploading"
+                ? "Enviando imagens, narração, música e legendas. Falhas de rede e timeouts serão informados automaticamente."
+                : "Gerando imagens, legendas e áudio em H.264/AAC no FFmpeg nativo do servidor."}
           </p>
         </div>
       )}
