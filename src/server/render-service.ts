@@ -112,12 +112,14 @@ function buildAss(captions: CaptionInput[], width: number, height: number): stri
             ? Math.max(1, remaining)
             : Math.max(1, Math.round((totalCs * word.length) / totalChars));
         used += duration;
-        return `{\\kf${duration}}${assText(word)}`;
+        // Palavra por palavra acompanha melhor o ritmo do que a varredura
+        // contínua do karaoke \kf.
+        return `{\\k${duration}}${assText(word)}`;
       })
       .join(" ");
     return `Dialogue: 0,${assTime(caption.start)},${assTime(caption.end)},Default,,0,0,0,,${karaoke}`;
   });
-  return `[Script Info]\nScriptType: v4.00+\nPlayResX: ${width}\nPlayResY: ${height}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,DejaVu Sans,${fontSize},&H003FD2FF,&H00E8E8E8,&H00101010,&H70000000,-1,0,0,0,100,100,0,0,3,5,0,2,80,80,${marginV},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events.join("\n")}\n`;
+  return `[Script Info]\nScriptType: v4.00+\nPlayResX: ${width}\nPlayResY: ${height}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,DejaVu Sans,${fontSize},&H003FD2FF,&H00F2F2F2,&H00101010,&H705C5C5C,-1,0,0,0,100,100,0,0,3,5,0,2,80,80,${marginV},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events.join("\n")}\n`;
 }
 
 function escapeFilterPath(filePath: string): string {
@@ -211,8 +213,10 @@ export async function handleFetchRender(request: Request): Promise<Response> {
       metadata.format === "webm" ? "output.webm" : "output.mp4",
     );
     const perImage = metadata.duration / images.length;
-    const scaledWidth = Math.ceil((metadata.width * 1.08) / 2) * 2;
-    const scaledHeight = Math.ceil((metadata.height * 1.08) / 2) * 2;
+    // A superfície 2x reduz o arredondamento do zoompan que fazia o centro
+    // oscilar entre pixels e dava a impressão de imagem tremendo.
+    const scaledWidth = metadata.width * 2;
+    const scaledHeight = metadata.height * 2;
     const frames = Math.max(1, Math.ceil(perImage * metadata.fps));
     const segmentPaths: string[] = [];
     activeJobs.set(id, { status: "encoding", timeSec: 0, fps: 0, speed: "1x" });
@@ -224,7 +228,7 @@ export async function handleFetchRender(request: Request): Promise<Response> {
       const segmentPath = path.join(workDir, `segment-${String(index).padStart(3, "0")}.mp4`);
       const base = `scale=${scaledWidth}:${scaledHeight}:force_original_aspect_ratio=increase,crop=${scaledWidth}:${scaledHeight}`;
       const motion = metadata.kenBurns
-        ? `,zoompan=z='min(zoom+${(0.06 / frames).toFixed(8)},1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${metadata.width}x${metadata.height}:fps=${metadata.fps}`
+        ? `,zoompan=z='1+0.04*on/${Math.max(1, frames - 1)}':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d=${frames}:s=${metadata.width}x${metadata.height}:fps=${metadata.fps}`
         : `,scale=${metadata.width}:${metadata.height}`;
       const segmentArgs = [
         "-y",
@@ -261,6 +265,7 @@ export async function handleFetchRender(request: Request): Promise<Response> {
       segmentPaths.push(segmentPath);
       const job = activeJobs.get(id);
       if (job) job.timeSec = ((index + 1) * perImage) / 2;
+      console.log(`[render-service] job=${id} segmento ${index + 1}/${images.length} concluído`);
     }
 
     const concatListPath = path.join(workDir, "segments.txt");
