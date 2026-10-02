@@ -81,31 +81,42 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
   const controller = new AbortController();
   let finished = false;
   let pollTimer = 0;
-  const poll = async () => {
-    if (finished) return;
+  let pollInFlight = false;
+  const poll = () => {
+    if (finished || pollInFlight) return;
     if (options.cancelRef?.cancelled) {
       controller.abort();
       return;
     }
-    try {
-      const query = new URLSearchParams({ id, timestamp: String(Date.now()) });
-      const response = await fetch(`${API_BASE}/api/render/progress?${query}`, {
-        cache: "no-store",
-        headers: { Accept: "application/json" },
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const progress = (await response.json()) as RenderProgress;
-      if (progress.status === "encoding" && options.duration > 0) {
+
+    // XMLHttpRequest mantém esta consulta totalmente independente do POST longo
+    // que recebe o vídeo. A URL por job também impede cache do navegador/proxy.
+    pollInFlight = true;
+    const request = new XMLHttpRequest();
+    request.open(
+      "GET",
+      `${API_BASE}/api/render/progress/${encodeURIComponent(id)}?timestamp=${Date.now()}`,
+      true,
+    );
+    request.responseType = "json";
+    request.timeout = 5000;
+    request.setRequestHeader("Accept", "application/json");
+    request.onload = () => {
+      if (request.status < 200 || request.status >= 300) return;
+      const progress = request.response as RenderProgress | null;
+      if (progress?.status === "encoding" && options.duration > 0) {
         options.onProgress?.(
           Math.max(0.05, Math.min(0.99, (progress.timeSec || 0) / options.duration)),
         );
       }
-    } catch (error) {
-      console.warn("Falha temporária ao atualizar o progresso da montagem.", error);
-      // A requisição principal fornece o erro definitivo.
-    } finally {
-      if (!finished) pollTimer = window.setTimeout(() => void poll(), 1000);
-    }
+    };
+    request.onerror = () => {
+      console.warn("Falha temporária ao atualizar o progresso da montagem.");
+    };
+    request.onloadend = () => {
+      pollInFlight = false;
+    };
+    request.send();
   };
 
   try {
@@ -115,7 +126,8 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
       body: form,
       signal: controller.signal,
     });
-    void poll();
+    poll();
+    pollTimer = window.setInterval(poll, 1000);
     const response = await renderRequest;
     if (!response.ok) throw new Error(await responseError(response));
     const blob = await response.blob();
@@ -132,6 +144,6 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
     throw error;
   } finally {
     finished = true;
-    if (pollTimer) window.clearTimeout(pollTimer);
+    if (pollTimer) window.clearInterval(pollTimer);
   }
 }

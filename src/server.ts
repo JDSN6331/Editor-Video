@@ -76,7 +76,14 @@ export default {
       if (url.pathname === "/api/transcode" && request.method === "POST") {
         return handleFetchTranscode(request);
       }
-      if (url.pathname === "/api/render/progress" && request.method === "GET") {
+      if (
+        (url.pathname === "/api/render/progress" ||
+          url.pathname.startsWith("/api/render/progress/")) &&
+        request.method === "GET"
+      ) {
+        if (!url.searchParams.has("id")) {
+          url.searchParams.set("id", url.pathname.split("/").filter(Boolean).at(-1) || "");
+        }
         return handleFetchTranscodeProgress(url);
       }
       if (url.pathname === "/api/render" && request.method === "POST") {

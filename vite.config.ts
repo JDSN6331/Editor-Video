@@ -49,7 +49,14 @@ export default defineConfig({
                 response = await transcode.handleFetchTranscodeProgress(url);
               } else if (pathname === "/api/transcode" && request.method === "POST") {
                 response = await transcode.handleFetchTranscode(request);
-              } else if (pathname === "/api/render/progress" && request.method === "GET") {
+              } else if (
+                (pathname === "/api/render/progress" ||
+                  pathname.startsWith("/api/render/progress/")) &&
+                request.method === "GET"
+              ) {
+                if (!url.searchParams.has("id")) {
+                  url.searchParams.set("id", pathname.split("/").filter(Boolean).at(-1) || "");
+                }
                 response = await transcode.handleFetchTranscodeProgress(url);
               } else if (pathname === "/api/render" && request.method === "POST") {
                 response = await renderer.handleFetchRender(request);
