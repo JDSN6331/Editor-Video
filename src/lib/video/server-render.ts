@@ -80,35 +80,43 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
 
   const controller = new AbortController();
   let finished = false;
-  const poll = window.setInterval(async () => {
+  let pollTimer = 0;
+  const poll = async () => {
     if (finished) return;
     if (options.cancelRef?.cancelled) {
       controller.abort();
       return;
     }
     try {
-      const response = await fetch(`${API_BASE}/api/render/progress?id=${encodeURIComponent(id)}`, {
+      const query = new URLSearchParams({ id, timestamp: String(Date.now()) });
+      const response = await fetch(`${API_BASE}/api/render/progress?${query}`, {
         cache: "no-store",
+        headers: { Accept: "application/json" },
       });
-      if (!response.ok) return;
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const progress = (await response.json()) as RenderProgress;
       if (progress.status === "encoding" && options.duration > 0) {
         options.onProgress?.(
           Math.max(0.05, Math.min(0.99, (progress.timeSec || 0) / options.duration)),
         );
       }
-    } catch {
+    } catch (error) {
+      console.warn("Falha temporária ao atualizar o progresso da montagem.", error);
       // A requisição principal fornece o erro definitivo.
+    } finally {
+      if (!finished) pollTimer = window.setTimeout(() => void poll(), 1000);
     }
-  }, 750);
+  };
 
   try {
     options.onProgress?.(0.02);
-    const response = await fetch(`${API_BASE}/api/render?id=${encodeURIComponent(id)}`, {
+    const renderRequest = fetch(`${API_BASE}/api/render?id=${encodeURIComponent(id)}`, {
       method: "POST",
       body: form,
       signal: controller.signal,
     });
+    void poll();
+    const response = await renderRequest;
     if (!response.ok) throw new Error(await responseError(response));
     const blob = await response.blob();
     if (!blob.size) throw new Error("O servidor retornou um vídeo vazio.");
@@ -124,6 +132,6 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
     throw error;
   } finally {
     finished = true;
-    window.clearInterval(poll);
+    if (pollTimer) window.clearTimeout(pollTimer);
   }
 }
