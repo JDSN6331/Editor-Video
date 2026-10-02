@@ -129,7 +129,11 @@ function parseTime(value: string): number {
   return parts.length === 3 ? (parts[0] || 0) * 3600 + (parts[1] || 0) * 60 + (parts[2] || 0) : 0;
 }
 
-async function runFfmpeg(args: string[], jobId: string): Promise<void> {
+async function runFfmpeg(
+  args: string[],
+  jobId: string,
+  onTime?: (seconds: number) => void,
+): Promise<void> {
   const binary = getFfmpegPath();
   if (!binary) throw new Error("FFmpeg nativo não está disponível no servidor.");
   await new Promise<void>((resolve, reject) => {
@@ -141,8 +145,10 @@ async function runFfmpeg(args: string[], jobId: string): Promise<void> {
       const matches = [...text.matchAll(/time=(\d{2}:\d{2}:\d{2}(?:\.\d+)?)/g)];
       const latestTime = matches.at(-1)?.[1];
       if (latestTime) {
+        const seconds = parseTime(latestTime);
         const job = activeJobs.get(jobId);
-        if (job) job.timeSec = Math.max(job.timeSec, parseTime(latestTime));
+        if (onTime) onTime(seconds);
+        else if (job) job.timeSec = Math.max(job.timeSec, seconds);
       }
     });
     proc.on("error", (error) => reject(new Error(`Falha ao iniciar FFmpeg: ${error.message}`)));
@@ -205,64 +211,93 @@ export async function handleFetchRender(request: Request): Promise<Response> {
       metadata.format === "webm" ? "output.webm" : "output.mp4",
     );
     const perImage = metadata.duration / images.length;
-    const fade = images.length > 1 ? Math.min(metadata.fade, perImage / 4) : 0;
-    const segmentDuration = perImage + fade;
-    const args: string[] = ["-y"];
-    imagePaths.forEach((imagePath) => {
-      args.push(
+    const scaledWidth = Math.ceil((metadata.width * 1.08) / 2) * 2;
+    const scaledHeight = Math.ceil((metadata.height * 1.08) / 2) * 2;
+    const frames = Math.max(1, Math.ceil(perImage * metadata.fps));
+    const segmentPaths: string[] = [];
+    activeJobs.set(id, { status: "encoding", timeSec: 0, fps: 0, speed: "1x" });
+    console.log(
+      `[render-service] job=${id} iniciando ${images.length} segmentos em ${metadata.width}x${metadata.height}@${metadata.fps}`,
+    );
+
+    for (let index = 0; index < imagePaths.length; index += 1) {
+      const segmentPath = path.join(workDir, `segment-${String(index).padStart(3, "0")}.mp4`);
+      const base = `scale=${scaledWidth}:${scaledHeight}:force_original_aspect_ratio=increase,crop=${scaledWidth}:${scaledHeight}`;
+      const motion = metadata.kenBurns
+        ? `,zoompan=z='min(zoom+${(0.06 / frames).toFixed(8)},1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${metadata.width}x${metadata.height}:fps=${metadata.fps}`
+        : `,scale=${metadata.width}:${metadata.height}`;
+      const segmentArgs = [
+        "-y",
         "-loop",
         "1",
         "-framerate",
         String(metadata.fps),
-        "-t",
-        String(segmentDuration),
         "-i",
-        imagePath,
-      );
-    });
-    args.push("-i", narrationPath);
-    if (musicPath) args.push("-stream_loop", "-1", "-i", musicPath);
+        imagePaths[index]!,
+        "-vf",
+        `${base}${motion},setsar=1,format=yuv420p`,
+        "-frames:v",
+        String(frames),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-threads",
+        "0",
+        segmentPath,
+      ];
+      await runFfmpeg(segmentArgs, id, (seconds) => {
+        const job = activeJobs.get(id);
+        if (job) {
+          const completed = index * perImage + Math.min(perImage, seconds);
+          job.timeSec = Math.max(job.timeSec, completed * 0.5);
+        }
+      });
+      segmentPaths.push(segmentPath);
+      const job = activeJobs.get(id);
+      if (job) job.timeSec = ((index + 1) * perImage) / 2;
+    }
 
+    const concatListPath = path.join(workDir, "segments.txt");
+    const concatList = segmentPaths
+      .map((segmentPath) => `file '${segmentPath.replace(/'/g, "'\\''")}'`)
+      .join("\n");
+    await fs.writeFile(concatListPath, `${concatList}\n`, "utf8");
+    const visualsPath = path.join(workDir, "visuals.mp4");
+    await runFfmpeg(
+      ["-y", "-f", "concat", "-safe", "0", "-i", concatListPath, "-c", "copy", visualsPath],
+      id,
+      () => {},
+    );
+
+    const args: string[] = ["-y", "-i", visualsPath, "-i", narrationPath];
+    if (musicPath) args.push("-stream_loop", "-1", "-i", musicPath);
     const filters: string[] = [];
-    const scaledWidth = Math.ceil((metadata.width * 1.08) / 2) * 2;
-    const scaledHeight = Math.ceil((metadata.height * 1.08) / 2) * 2;
-    const frames = Math.max(1, Math.ceil(segmentDuration * metadata.fps));
-    imagePaths.forEach((_, index) => {
-      const base = `[${index}:v]scale=${scaledWidth}:${scaledHeight}:force_original_aspect_ratio=increase,crop=${scaledWidth}:${scaledHeight}`;
-      const motion = metadata.kenBurns
-        ? `,zoompan=z='min(zoom+${(0.06 / frames).toFixed(8)},1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${metadata.width}x${metadata.height}:fps=${metadata.fps}`
-        : `,scale=${metadata.width}:${metadata.height}`;
-      filters.push(`${base}${motion},setsar=1,format=yuv420p[v${index}]`);
-    });
-    let videoLabel = "v0";
-    for (let index = 1; index < images.length; index += 1) {
-      const nextLabel = `vx${index}`;
-      filters.push(
-        `[${videoLabel}][v${index}]xfade=transition=fade:duration=${fade || 0.001}:offset=${(index * perImage).toFixed(6)}[${nextLabel}]`,
-      );
-      videoLabel = nextLabel;
-    }
     if (metadata.captions?.length) {
-      filters.push(`[${videoLabel}]subtitles=filename='${escapeFilterPath(assPath)}'[videoout]`);
-      videoLabel = "videoout";
+      filters.push(`[0:v]subtitles=filename='${escapeFilterPath(assPath)}'[videoout]`);
+    } else {
+      filters.push("[0:v]null[videoout]");
     }
-    const narrationIndex = images.length;
     if (musicPath) {
-      const musicIndex = narrationIndex + 1;
       const fadeStart = Math.max(0, metadata.duration - 2);
-      filters.push(`[${narrationIndex}:a]volume=${metadata.narrationVolume}[narr]`);
+      filters.push(`[1:a]volume=${metadata.narrationVolume}[narr]`);
       filters.push(
-        `[${musicIndex}:a]volume=${metadata.musicVolume},atrim=0:${metadata.duration},afade=t=out:st=${fadeStart}:d=2[music]`,
+        `[2:a]volume=${metadata.musicVolume},atrim=0:${metadata.duration},afade=t=out:st=${fadeStart}:d=2[music]`,
       );
       filters.push("[narr][music]amix=inputs=2:duration=first:dropout_transition=0[audioout]");
     } else {
-      filters.push(`[${narrationIndex}:a]volume=${metadata.narrationVolume}[audioout]`);
+      filters.push(`[1:a]volume=${metadata.narrationVolume}[audioout]`);
     }
     args.push(
       "-filter_complex",
       filters.join(";"),
       "-map",
-      `[${videoLabel}]`,
+      "[videoout]",
       "-map",
       "[audioout]",
       "-t",
@@ -302,8 +337,16 @@ export async function handleFetchRender(request: Request): Promise<Response> {
       );
     }
     args.push("-threads", "0", outputPath);
-    activeJobs.set(id, { status: "encoding", timeSec: 0, fps: 0, speed: "1x" });
-    await runFfmpeg(args, id);
+    console.log(`[render-service] job=${id} aplicando áudio e legendas`);
+    await runFfmpeg(args, id, (seconds) => {
+      const job = activeJobs.get(id);
+      if (job) {
+        job.timeSec = Math.max(
+          job.timeSec,
+          metadata.duration * 0.5 + Math.min(metadata.duration, seconds) * 0.5,
+        );
+      }
+    });
     const output = await fs.readFile(outputPath);
     activeJobs.set(id, {
       status: "done",
