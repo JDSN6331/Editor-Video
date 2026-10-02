@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   Download,
   Play,
@@ -115,8 +116,10 @@ export function RenderStep() {
         format: preferredFormat,
         onProgress: (value) => {
           const percent = value * 100;
-          setRenderStage("encoding");
-          setLiveProgress(percent);
+          flushSync(() => {
+            setRenderStage("encoding");
+            setLiveProgress((current) => Math.max(current, percent));
+          });
           setProgress(percent);
         },
         cancelRef: cancelRef.current,
