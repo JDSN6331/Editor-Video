@@ -29,14 +29,23 @@ function numberInRange(value: unknown, fallback: number, min: number, max: numbe
   return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback;
 }
 
-function validateMetadata(raw: unknown): RenderMetadata {
+function validateMetadata(raw: unknown, durationField?: FormDataEntryValue | null): RenderMetadata {
   const input = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const width = numberInRange(input.width, 1920, 320, 1920);
   const height = numberInRange(input.height, 1080, 180, 1080);
   const fps = [24, 30, 60].includes(Number(input.fps)) ? Number(input.fps) : 30;
-  const duration = numberInRange(input.duration, 0, 0.1, 3600);
-  if (duration <= 0) throw new Error("Duração inválida para a montagem.");
   const rawCaptions = Array.isArray(input.captions) ? input.captions : [];
+  const captionDuration = rawCaptions.reduce((largest, item) => {
+    const end = Number((item as Record<string, unknown>)?.end);
+    return Number.isFinite(end) ? Math.max(largest, end) : largest;
+  }, 0);
+  const separateDuration = Number(durationField);
+  const fallbackDuration =
+    Number.isFinite(separateDuration) && separateDuration > 0 ? separateDuration : captionDuration;
+  const duration = numberInRange(input.duration, fallbackDuration, 0.1, 3600);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    throw new Error("Duração inválida para a montagem. Recarregue a narração e tente novamente.");
+  }
   const captions = rawCaptions
     .slice(0, 5000)
     .map((item) => {
@@ -153,7 +162,10 @@ export async function handleFetchRender(request: Request): Promise<Response> {
   activeJobs.set(id, { status: "uploading", timeSec: 0, fps: 0, speed: "0x" });
   try {
     const form = await request.formData();
-    const metadata = validateMetadata(JSON.parse(String(form.get("metadata") || "{}")));
+    const metadata = validateMetadata(
+      JSON.parse(String(form.get("metadata") || "{}")),
+      form.get("duration"),
+    );
     const images = form.getAll("images").filter((value): value is File => value instanceof File);
     const narration = form.get("narration");
     const music = form.get("music");

@@ -56,6 +56,8 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
     captions: options.captions,
   };
   form.append("metadata", JSON.stringify(metadata));
+  // Campo redundante para parsers multipart/proxies que possam alterar o JSON.
+  form.append("duration", String(options.duration));
 
   const imageBlobs = await Promise.all(
     options.images.map((image) => sourceToBlob(image.dataUrl || image.url)),
