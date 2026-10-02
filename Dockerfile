@@ -5,6 +5,7 @@ WORKDIR /app
 
 # Install build dependencies
 COPY package*.json ./
+RUN npm install --global npm@11.6.2
 RUN npm ci
 
 # Copy source code and build
