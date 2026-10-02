@@ -82,6 +82,7 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
   let finished = false;
   let pollTimer = 0;
   let pollInFlight = false;
+  let progressEvents: EventSource | null = null;
   const poll = () => {
     if (finished || pollInFlight) return;
     if (options.cancelRef?.cancelled) {
@@ -126,6 +127,21 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
       body: form,
       signal: controller.signal,
     });
+    progressEvents = new EventSource(
+      `${API_BASE}/api/render/events/${encodeURIComponent(id)}?timestamp=${Date.now()}`,
+    );
+    progressEvents.onmessage = (event) => {
+      try {
+        const progress = JSON.parse(event.data) as RenderProgress;
+        if (progress.status === "encoding" && options.duration > 0) {
+          options.onProgress?.(
+            Math.max(0.05, Math.min(0.99, (progress.timeSec || 0) / options.duration)),
+          );
+        }
+      } catch {
+        // O polling abaixo permanece como contingência.
+      }
+    };
     poll();
     pollTimer = window.setInterval(poll, 1000);
     const response = await renderRequest;
@@ -144,6 +160,7 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
     throw error;
   } finally {
     finished = true;
+    progressEvents?.close();
     if (pollTimer) window.clearInterval(pollTimer);
   }
 }

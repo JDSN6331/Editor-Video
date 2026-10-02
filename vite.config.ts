@@ -43,7 +43,9 @@ export default defineConfig({
               const renderer = await import("./src/server/render-service.js");
 
               let response: Response;
-              if (pathname === "/api/transcode/status" && request.method === "GET") {
+              if (pathname.startsWith("/api/render/events/") && request.method === "GET") {
+                response = transcode.handleFetchRenderEvents(url);
+              } else if (pathname === "/api/transcode/status" && request.method === "GET") {
                 response = await transcode.handleFetchTranscodeStatus();
               } else if (pathname === "/api/transcode/progress" && request.method === "GET") {
                 response = await transcode.handleFetchTranscodeProgress(url);

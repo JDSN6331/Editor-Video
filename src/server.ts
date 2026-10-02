@@ -6,6 +6,7 @@ import {
   handleFetchTranscode,
   handleFetchTranscodeProgress,
   handleFetchTranscodeStatus,
+  handleFetchRenderEvents,
 } from "./server/transcode-service";
 import { handleFetchRender } from "./server/render-service";
 
@@ -75,6 +76,9 @@ export default {
       }
       if (url.pathname === "/api/transcode" && request.method === "POST") {
         return handleFetchTranscode(request);
+      }
+      if (url.pathname.startsWith("/api/render/events/") && request.method === "GET") {
+        return handleFetchRenderEvents(url);
       }
       if (
         (url.pathname === "/api/render/progress" ||

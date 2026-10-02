@@ -417,6 +417,52 @@ export async function handleFetchTranscodeProgress(url: URL): Promise<Response> 
   });
 }
 
+export function handleFetchRenderEvents(url: URL): Response {
+  const id = url.searchParams.get("id") || url.pathname.split("/").filter(Boolean).at(-1) || "";
+  const encoder = new TextEncoder();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let missingTicks = 0;
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = () => {
+        const job = activeJobs.get(id);
+        if (!job) {
+          missingTicks += 1;
+          controller.enqueue(encoder.encode("event: waiting\ndata: {}\n\n"));
+          if (missingTicks < 60) return;
+          if (timer) clearInterval(timer);
+          controller.close();
+          return;
+        }
+
+        missingTicks = 0;
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(job)}\n\n`));
+        if (job.status === "done" || job.status === "error") {
+          if (timer) clearInterval(timer);
+          controller.close();
+        }
+      };
+
+      send();
+      timer = setInterval(send, 1000);
+    },
+    cancel() {
+      if (timer) clearInterval(timer);
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
 export async function handleFetchTranscode(request: Request): Promise<Response> {
   if (!isFfmpegAvailable()) {
     return new Response(JSON.stringify({ error: "FFmpeg não está disponível no servidor." }), {
