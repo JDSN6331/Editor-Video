@@ -19,6 +19,7 @@ export interface TranscodeJobProgress {
 }
 
 export const activeJobs = new Map<string, TranscodeJobProgress>();
+const lastProgressLog = new Map<string, number>();
 
 /**
  * Localiza o executável nativo do FFmpeg no sistema operacional
@@ -405,6 +406,15 @@ export async function handleFetchTranscodeStatus(): Promise<Response> {
 export async function handleFetchTranscodeProgress(url: URL): Promise<Response> {
   const id = url.searchParams.get("id");
   const job = id ? activeJobs.get(id) : null;
+  if (id && job) {
+    const previous = lastProgressLog.get(id) ?? -10;
+    if (job.status !== "encoding" || job.timeSec - previous >= 10) {
+      console.log(
+        `[render-progress] job=${id} status=${job.status} time=${job.timeSec.toFixed(2)}s`,
+      );
+      lastProgressLog.set(id, job.timeSec);
+    }
+  }
   return new Response(JSON.stringify(job || { status: "not_found" }), {
     status: 200,
     headers: {

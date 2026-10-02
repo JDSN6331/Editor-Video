@@ -55,6 +55,7 @@ export function RenderStep() {
   const previewRef = useRef<HTMLCanvasElement>(null);
   const cancelRef = useRef({ cancelled: false });
   const [renderStage, setRenderStage] = useState<"rendering" | "encoding">("rendering");
+  const [liveProgress, setLiveProgress] = useState(0);
 
   // O preview é apenas uma amostra visual leve. A exportação completa continua
   // sendo feita exclusivamente pelo FFmpeg nativo no servidor.
@@ -92,6 +93,7 @@ export function RenderStep() {
     setError(null);
     setResult(null);
     setProgress(0);
+    setLiveProgress(0);
     setRenderStage("rendering");
     setRendering(true);
     cancelRef.current = { cancelled: false };
@@ -112,8 +114,10 @@ export function RenderStep() {
         fade: Math.min(0.6, perImage / 4),
         format: preferredFormat,
         onProgress: (value) => {
+          const percent = value * 100;
           setRenderStage("encoding");
-          setProgress(value * 100);
+          setLiveProgress(percent);
+          setProgress(percent);
         },
         cancelRef: cancelRef.current,
       });
@@ -124,10 +128,12 @@ export function RenderStep() {
         size: outputBlob.size,
       });
       setProgress(100);
+      setLiveProgress(100);
     } catch (e) {
       if (cancelRef.current.cancelled || (e instanceof Error && e.message === "CANCELLED")) {
         setError(null);
         setProgress(0);
+        setLiveProgress(0);
         return;
       }
       setError(e instanceof Error ? e.message : "Falha ao montar o vídeo.");
@@ -135,6 +141,8 @@ export function RenderStep() {
       setRendering(false);
     }
   };
+
+  const displayedProgress = rendering ? liveProgress : progress;
 
   return (
     <StepCard
@@ -346,13 +354,13 @@ export function RenderStep() {
               <Sparkles className="size-3.5 animate-pulse text-primary" />
               {renderStage === "rendering"
                 ? "Preparando mídias para envio ao servidor..."
-                : `Montando vídeo no FFmpeg do servidor (${Math.round(progress)}%)`}
+                : `Montando vídeo no FFmpeg do servidor (${Math.round(displayedProgress)}%)`}
             </span>
             <span className="text-foreground/80 font-mono font-medium text-xs bg-background/80 px-2 py-0.5 rounded border border-border">
-              {`${formatTime(Math.min(duration, (progress / 100) * duration))} / ${formatTime(duration)}`}
+              {`${formatTime(Math.min(duration, (displayedProgress / 100) * duration))} / ${formatTime(duration)}`}
             </span>
           </div>
-          <Progress value={progress} className="h-2.5" />
+          <Progress value={displayedProgress} className="h-2.5" />
           <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
             {renderStage === "rendering"
               ? "Enviando imagens, narração, música e tempos das legendas..."

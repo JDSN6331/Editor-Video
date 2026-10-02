@@ -384,6 +384,16 @@ export async function handleFetchRender(request: Request): Promise<Response> {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Falha na montagem do vídeo.";
+    if (message === "CANCELLED") {
+      activeJobs.set(id, {
+        status: "error",
+        timeSec: activeJobs.get(id)?.timeSec || 0,
+        fps: 0,
+        speed: "0x",
+        error: "Montagem cancelada pelo usuário.",
+      });
+      return Response.json({ error: "Montagem cancelada pelo usuário." }, { status: 499 });
+    }
     activeJobs.set(id, { status: "error", timeSec: 0, fps: 0, speed: "0x", error: message });
     console.error("[render-service]", error);
     return Response.json({ error: message }, { status: 500 });
