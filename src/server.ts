@@ -7,6 +7,7 @@ import {
   handleFetchTranscodeProgress,
   handleFetchTranscodeStatus,
 } from "./server/transcode-service";
+import { handleFetchRender } from "./server/render-service";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -53,7 +54,10 @@ export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
       const url = new URL(request.url);
-      if (url.pathname.startsWith("/api/transcode") && request.method === "OPTIONS") {
+      if (
+        (url.pathname.startsWith("/api/transcode") || url.pathname.startsWith("/api/render")) &&
+        request.method === "OPTIONS"
+      ) {
         return new Response(null, {
           status: 204,
           headers: {
@@ -71,6 +75,12 @@ export default {
       }
       if (url.pathname === "/api/transcode" && request.method === "POST") {
         return handleFetchTranscode(request);
+      }
+      if (url.pathname === "/api/render/progress" && request.method === "GET") {
+        return handleFetchTranscodeProgress(url);
+      }
+      if (url.pathname === "/api/render" && request.method === "POST") {
+        return handleFetchRender(request);
       }
 
       const handler = await getServerEntry();

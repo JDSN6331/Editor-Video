@@ -15,7 +15,7 @@ import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { useVideoProject } from "@/contexts/VideoProjectContext";
 import { formatTime } from "@/lib/video/captions";
-import { renderVideo } from "@/lib/video/render";
+import { renderVideoOnServer } from "@/lib/video/server-render";
 import { VIDEO_PRESETS, type PresetKey } from "@/lib/video/types";
 import { downloadBlob } from "@/lib/utils";
 import { GoogleDriveUpload } from "./GoogleDriveUpload";
@@ -75,10 +75,10 @@ export function RenderStep() {
 
     try {
       const { width, height } = VIDEO_PRESETS[preset];
-      const out = await renderVideo({
-        images: images.map((image) => image.element),
-        narrationBuffer: narration.buffer,
-        musicBuffer: music?.buffer ?? null,
+      const outputBlob = await renderVideoOnServer({
+        images,
+        narration,
+        music,
         musicVolume: effectiveMusicVolume,
         narrationVolume: narrationVolume / 100,
         captions: showCaptions ? captions : null,
@@ -88,18 +88,17 @@ export function RenderStep() {
         kenBurns,
         fade: Math.min(0.6, perImage / 4),
         format: preferredFormat,
-        previewCanvas: previewRef.current,
-        onProgress: (value, stage) => {
-          setProgress(value);
-          setRenderStage(stage);
+        onProgress: (value) => {
+          setRenderStage("encoding");
+          setProgress(value * 100);
         },
         cancelRef: cancelRef.current,
       });
 
       setResult({
-        url: URL.createObjectURL(out.blob),
-        extension: out.extension,
-        size: out.blob.size,
+        url: URL.createObjectURL(outputBlob),
+        extension: preferredFormat,
+        size: outputBlob.size,
       });
       setProgress(100);
     } catch (e) {
@@ -323,24 +322,18 @@ export function RenderStep() {
             <span className="font-semibold flex items-center gap-1.5 text-primary">
               <Sparkles className="size-3.5 animate-pulse text-primary" />
               {renderStage === "rendering"
-                ? `Etapa 1/2: Montando vídeo e áudio (${Math.round((progress / 85) * 100)}%)`
-                : `Etapa 2/2: Finalizando MP4 no FFmpeg do servidor (${Math.round(
-                    Math.max(0, Math.min(100, ((progress - 85) / 15) * 100)),
-                  )}%)`}
+                ? "Preparando mídias para envio ao servidor..."
+                : `Montando vídeo no FFmpeg do servidor (${Math.round(progress)}%)`}
             </span>
             <span className="text-foreground/80 font-mono font-medium text-xs bg-background/80 px-2 py-0.5 rounded border border-border">
-              {renderStage === "rendering"
-                ? `${formatTime(Math.min(duration, (progress / 85) * duration))} / ${formatTime(duration)}`
-                : `${formatTime(
-                    Math.min(duration, Math.max(0, (progress - 85) / 15) * duration),
-                  )} / ${formatTime(duration)}`}
+              {`${formatTime(Math.min(duration, (progress / 100) * duration))} / ${formatTime(duration)}`}
             </span>
           </div>
           <Progress value={progress} className="h-2.5" />
           <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
             {renderStage === "rendering"
-              ? "Desenhando os quadros, aplicando as legendas sincronizadas e mixando o áudio..."
-              : "Codificando em H.264/AAC com o FFmpeg nativo do servidor local."}
+              ? "Enviando imagens, narração, música e tempos das legendas..."
+              : "Gerando imagens, legendas e áudio em H.264/AAC no FFmpeg nativo do servidor."}
           </p>
         </div>
       )}

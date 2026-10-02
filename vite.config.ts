@@ -15,7 +15,7 @@ export default defineConfig({
           server.middlewares.use(async (req, res, next) => {
             const requestUrl = req.url || "/";
             const pathname = new URL(requestUrl, "http://localhost").pathname;
-            if (!pathname.startsWith("/api/transcode")) {
+            if (!pathname.startsWith("/api/transcode") && !pathname.startsWith("/api/render")) {
               next();
               return;
             }
@@ -40,6 +40,7 @@ export default defineConfig({
               const request = new Request(new URL(requestUrl, origin), init);
               const url = new URL(request.url);
               const transcode = await import("./src/server/transcode-service.js");
+              const renderer = await import("./src/server/render-service.js");
 
               let response: Response;
               if (pathname === "/api/transcode/status" && request.method === "GET") {
@@ -48,6 +49,10 @@ export default defineConfig({
                 response = await transcode.handleFetchTranscodeProgress(url);
               } else if (pathname === "/api/transcode" && request.method === "POST") {
                 response = await transcode.handleFetchTranscode(request);
+              } else if (pathname === "/api/render/progress" && request.method === "GET") {
+                response = await transcode.handleFetchTranscodeProgress(url);
+              } else if (pathname === "/api/render" && request.method === "POST") {
+                response = await renderer.handleFetchRender(request);
               } else {
                 response = new Response("Not Found", { status: 404 });
               }
