@@ -43,7 +43,13 @@ export default defineConfig({
               const renderer = await import("./src/server/render-service.js");
 
               let response: Response;
-              if (pathname.startsWith("/api/render/events/") && request.method === "GET") {
+              if (pathname === "/api/render/start" && request.method === "POST") {
+                response = await renderer.handleFetchRenderStart(request);
+              } else if (pathname.startsWith("/api/render/cancel/") && request.method === "POST") {
+                response = renderer.handleFetchRenderCancel(url);
+              } else if (pathname.startsWith("/api/render/result/") && request.method === "GET") {
+                response = renderer.handleFetchRenderResult(url);
+              } else if (pathname.startsWith("/api/render/events/") && request.method === "GET") {
                 response = transcode.handleFetchRenderEvents(url);
               } else if (pathname === "/api/transcode/status" && request.method === "GET") {
                 response = await transcode.handleFetchTranscodeStatus();

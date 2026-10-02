@@ -8,7 +8,12 @@ import {
   handleFetchTranscodeStatus,
   handleFetchRenderEvents,
 } from "./server/transcode-service";
-import { handleFetchRender } from "./server/render-service";
+import {
+  handleFetchRender,
+  handleFetchRenderCancel,
+  handleFetchRenderResult,
+  handleFetchRenderStart,
+} from "./server/render-service";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -79,6 +84,15 @@ export default {
       }
       if (url.pathname.startsWith("/api/render/events/") && request.method === "GET") {
         return handleFetchRenderEvents(url);
+      }
+      if (url.pathname === "/api/render/start" && request.method === "POST") {
+        return handleFetchRenderStart(request);
+      }
+      if (url.pathname.startsWith("/api/render/cancel/") && request.method === "POST") {
+        return handleFetchRenderCancel(url);
+      }
+      if (url.pathname.startsWith("/api/render/result/") && request.method === "GET") {
+        return handleFetchRenderResult(url);
       }
       if (
         (url.pathname === "/api/render/progress" ||

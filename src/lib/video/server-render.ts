@@ -21,6 +21,7 @@ interface ServerRenderOptions {
 interface RenderProgress {
   status: "uploading" | "encoding" | "done" | "error" | "not_found";
   timeSec?: number;
+  error?: string;
 }
 
 const API_BASE = String(import.meta.env.VITE_TRANSCODE_API_URL || "").replace(/\/$/, "");
@@ -78,89 +79,57 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
     );
   }
 
-  const controller = new AbortController();
-  let finished = false;
-  let pollTimer = 0;
-  let pollInFlight = false;
-  let progressEvents: EventSource | null = null;
-  const poll = () => {
-    if (finished || pollInFlight) return;
-    if (options.cancelRef?.cancelled) {
-      controller.abort();
-      return;
-    }
+  try {
+    options.onProgress?.(0.02);
+    const startResponse = await fetch(`${API_BASE}/api/render/start?id=${encodeURIComponent(id)}`, {
+      method: "POST",
+      body: form,
+    });
+    if (!startResponse.ok) throw new Error(await responseError(startResponse));
 
-    // XMLHttpRequest mantém esta consulta totalmente independente do POST longo
-    // que recebe o vídeo. A URL por job também impede cache do navegador/proxy.
-    pollInFlight = true;
-    const request = new XMLHttpRequest();
-    request.open(
-      "GET",
-      `${API_BASE}/api/render/progress/${encodeURIComponent(id)}?timestamp=${Date.now()}`,
-      true,
-    );
-    request.responseType = "json";
-    request.timeout = 5000;
-    request.setRequestHeader("Accept", "application/json");
-    request.onload = () => {
-      if (request.status < 200 || request.status >= 300) return;
-      const progress = request.response as RenderProgress | null;
-      if (progress?.status === "encoding" && options.duration > 0) {
+    while (true) {
+      if (options.cancelRef?.cancelled) {
+        await fetch(`${API_BASE}/api/render/cancel/${encodeURIComponent(id)}`, {
+          method: "POST",
+          keepalive: true,
+        }).catch(() => {});
+        throw new Error("CANCELLED");
+      }
+
+      const statusResponse = await fetch(
+        `${API_BASE}/api/render/progress/${encodeURIComponent(id)}?timestamp=${Date.now()}`,
+        { cache: "no-store" },
+      );
+      if (!statusResponse.ok) throw new Error(await responseError(statusResponse));
+      const progress = (await statusResponse.json()) as RenderProgress;
+      if (progress.status === "error") throw new Error(progress.error || "Falha na montagem.");
+      if (progress.status === "encoding" && options.duration > 0) {
         options.onProgress?.(
           Math.max(0.05, Math.min(0.99, (progress.timeSec || 0) / options.duration)),
         );
       }
-    };
-    request.onerror = () => {
-      console.warn("Falha temporária ao atualizar o progresso da montagem.");
-    };
-    request.onloadend = () => {
-      pollInFlight = false;
-    };
-    request.send();
-  };
-
-  try {
-    options.onProgress?.(0.02);
-    const renderRequest = fetch(`${API_BASE}/api/render?id=${encodeURIComponent(id)}`, {
-      method: "POST",
-      body: form,
-      signal: controller.signal,
-    });
-    progressEvents = new EventSource(
-      `${API_BASE}/api/render/events/${encodeURIComponent(id)}?timestamp=${Date.now()}`,
-    );
-    progressEvents.onmessage = (event) => {
-      try {
-        const progress = JSON.parse(event.data) as RenderProgress;
-        if (progress.status === "encoding" && options.duration > 0) {
-          options.onProgress?.(
-            Math.max(0.05, Math.min(0.99, (progress.timeSec || 0) / options.duration)),
+      if (progress.status === "done") {
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          const resultResponse = await fetch(
+            `${API_BASE}/api/render/result/${encodeURIComponent(id)}?timestamp=${Date.now()}`,
+            { cache: "no-store" },
           );
+          if (resultResponse.ok) {
+            const blob = await resultResponse.blob();
+            if (!blob.size) throw new Error("O servidor retornou um vídeo vazio.");
+            options.onProgress?.(1);
+            return blob;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 300));
         }
-      } catch {
-        // O polling abaixo permanece como contingência.
+        throw new Error("O vídeo foi concluído, mas não ficou disponível para download.");
       }
-    };
-    poll();
-    pollTimer = window.setInterval(poll, 1000);
-    const response = await renderRequest;
-    if (!response.ok) throw new Error(await responseError(response));
-    const blob = await response.blob();
-    if (!blob.size) throw new Error("O servidor retornou um vídeo vazio.");
-    options.onProgress?.(1);
-    return blob;
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
   } catch (error) {
-    if (
-      options.cancelRef?.cancelled ||
-      (error instanceof DOMException && error.name === "AbortError")
-    ) {
+    if (options.cancelRef?.cancelled || (error instanceof Error && error.message === "CANCELLED")) {
       throw new Error("CANCELLED");
     }
     throw error;
-  } finally {
-    finished = true;
-    progressEvents?.close();
-    if (pollTimer) window.clearInterval(pollTimer);
   }
 }
