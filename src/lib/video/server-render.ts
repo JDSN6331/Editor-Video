@@ -27,6 +27,13 @@ interface RenderProgress {
   timeSec?: number;
 }
 
+type PreparedAsset = {
+  kind: "image" | "narration" | "music";
+  index: number;
+  name: string;
+  blob: Blob;
+};
+
 const API_BASE = String(import.meta.env.VITE_TRANSCODE_API_URL || "").replace(/\/$/, "");
 
 function dataUrlToBlob(source: string): Blob {
@@ -78,6 +85,54 @@ async function responseError(response: Response): Promise<string> {
   }
 }
 
+function uploadAsset(
+  id: string,
+  asset: PreparedAsset,
+  onLoaded: (loaded: number) => void,
+  cancelRef?: { cancelled: boolean },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const query = new URLSearchParams({
+      id,
+      kind: asset.kind,
+      index: String(asset.index),
+      name: asset.name,
+    });
+    const request = new XMLHttpRequest();
+    request.open("POST", `${API_BASE}/api/render/upload?${query}`);
+    request.responseType = "json";
+    request.timeout = 2 * 60 * 1000;
+    request.upload.onprogress = (event) => onLoaded(event.loaded);
+    const cancelTimer = window.setInterval(() => {
+      if (cancelRef?.cancelled) request.abort();
+    }, 200);
+    const finish = () => window.clearInterval(cancelTimer);
+    request.onload = () => {
+      finish();
+      const payload = (request.response || {}) as { fileName?: string; error?: string };
+      if (request.status >= 200 && request.status < 300 && payload.fileName) {
+        onLoaded(asset.blob.size);
+        resolve(payload.fileName);
+      } else {
+        reject(new Error(payload.error || `Falha ao enviar ${asset.name}.`));
+      }
+    };
+    request.onerror = () => {
+      finish();
+      reject(new Error(`Falha de conexão ao enviar ${asset.name}.`));
+    };
+    request.ontimeout = () => {
+      finish();
+      reject(new Error(`O envio de ${asset.name} excedeu 2 minutos.`));
+    };
+    request.onabort = () => {
+      finish();
+      reject(new Error("CANCELLED"));
+    };
+    request.send(asset.blob);
+  });
+}
+
 export async function renderVideoOnServer(options: ServerRenderOptions): Promise<Blob> {
   const id = crypto.randomUUID();
   const form = new FormData();
@@ -97,6 +152,7 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
   // Campo redundante para parsers multipart/proxies que possam alterar o JSON.
   form.append("duration", String(options.duration));
 
+  const assets: PreparedAsset[] = [];
   const mediaCount = options.images.length + 1 + (options.music ? 1 : 0);
   let prepared = 0;
   const reportPrepared = (name: string) => {
@@ -107,7 +163,7 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
     if (options.cancelRef?.cancelled) throw new Error("CANCELLED");
     const image = options.images[index]!;
     const blob = await sourceToBlob(image.dataUrl || image.url, image.name);
-    form.append("images", blob, image.name || `image-${index + 1}`);
+    assets.push({ kind: "image", index, name: image.name, blob });
     reportPrepared(image.name);
     await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
   }
@@ -115,15 +171,36 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
     options.narration.dataUrl || options.narration.url,
     options.narration.name,
   );
-  form.append("narration", narrationBlob, options.narration.name);
+  assets.push({ kind: "narration", index: 0, name: options.narration.name, blob: narrationBlob });
   reportPrepared(options.narration.name);
   if (options.music) {
     const musicBlob = await sourceToBlob(
       options.music.dataUrl || options.music.url,
       options.music.name,
     );
-    form.append("music", musicBlob, options.music.name);
+    assets.push({ kind: "music", index: 0, name: options.music.name, blob: musicBlob });
     reportPrepared(options.music.name);
+  }
+
+  const totalBytes = Math.max(
+    1,
+    assets.reduce((sum, asset) => sum + asset.blob.size, 0),
+  );
+  let completedBytes = 0;
+  for (const asset of assets) {
+    if (options.cancelRef?.cancelled) throw new Error("CANCELLED");
+    const fileName = await uploadAsset(
+      id,
+      asset,
+      (loaded) => {
+        const uploadFraction = (completedBytes + loaded) / totalBytes;
+        options.onProgress?.(0.02 + uploadFraction * 0.08, "uploading", asset.name);
+      },
+      options.cancelRef,
+    );
+    completedBytes += asset.blob.size;
+    if (asset.kind === "image") form.append("images", fileName);
+    else form.append(asset.kind, fileName);
   }
 
   const controller = new AbortController();
@@ -145,7 +222,7 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
       const progress = (await response.json()) as RenderProgress;
       if (progress.status === "encoding" && options.duration > 0) {
         options.onProgress?.(
-          Math.max(0.05, Math.min(0.99, (progress.timeSec || 0) / options.duration)),
+          0.1 + Math.min(0.89, ((progress.timeSec || 0) / options.duration) * 0.89),
           "encoding",
         );
       }
@@ -158,7 +235,6 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
   };
 
   try {
-    options.onProgress?.(0.02, "uploading");
     const renderRequest = fetch(`${API_BASE}/api/render?id=${encodeURIComponent(id)}`, {
       method: "POST",
       body: form,

@@ -51,6 +51,8 @@ export default defineConfig({
                 response = await transcode.handleFetchTranscode(request);
               } else if (pathname === "/api/render/progress" && request.method === "GET") {
                 response = await transcode.handleFetchTranscodeProgress(url);
+              } else if (pathname === "/api/render/upload" && request.method === "POST") {
+                response = await renderer.handleFetchRenderUpload(request);
               } else if (pathname === "/api/render" && request.method === "POST") {
                 response = await renderer.handleFetchRender(request);
               } else {

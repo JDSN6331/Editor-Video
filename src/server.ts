@@ -7,7 +7,7 @@ import {
   handleFetchTranscodeProgress,
   handleFetchTranscodeStatus,
 } from "./server/transcode-service";
-import { handleFetchRender } from "./server/render-service";
+import { handleFetchRender, handleFetchRenderUpload } from "./server/render-service";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -78,6 +78,9 @@ export default {
       }
       if (url.pathname === "/api/render/progress" && request.method === "GET") {
         return handleFetchTranscodeProgress(url);
+      }
+      if (url.pathname === "/api/render/upload" && request.method === "POST") {
+        return handleFetchRenderUpload(request);
       }
       if (url.pathname === "/api/render" && request.method === "POST") {
         return handleFetchRender(request);

@@ -357,10 +357,10 @@ export function RenderStep() {
             </span>
             <span className="text-foreground/80 font-mono font-medium text-xs bg-background/80 px-2 py-0.5 rounded border border-border">
               {renderStage === "encoding"
-                ? `${formatTime(Math.min(duration, (progress / 100) * duration))} / ${formatTime(duration)}`
+                ? `${formatTime(Math.min(duration, (Math.max(0, progress - 10) / 89) * duration))} / ${formatTime(duration)}`
                 : renderStage === "preparing"
                   ? renderDetail || "Preparação local"
-                  : "Aguardando o servidor"}
+                  : renderDetail || "Enviando ao servidor"}
             </span>
           </div>
           <Progress value={progress} className="h-2.5" />

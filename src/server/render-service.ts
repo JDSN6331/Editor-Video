@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { createWriteStream, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { activeJobs, getFfmpegPath } from "./transcode-service";
 
 interface CaptionInput {
@@ -22,6 +24,44 @@ interface RenderMetadata {
   fade: number;
   format: "mp4" | "webm";
   captions: CaptionInput[] | null;
+}
+
+function safeJobId(value: string | null): string {
+  return value && /^[a-zA-Z0-9-]{1,64}$/.test(value) ? value : randomUUID();
+}
+
+function uploadDirectory(id: string): string {
+  return path.join(os.tmpdir(), `studio-render-upload-${id}`);
+}
+
+function safeStoredName(value: FormDataEntryValue | null): string | null {
+  return typeof value === "string" && /^[a-zA-Z0-9._-]+$/.test(value) ? value : null;
+}
+
+export async function handleFetchRenderUpload(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const id = safeJobId(url.searchParams.get("id"));
+  const kind = url.searchParams.get("kind");
+  const index = Number.parseInt(url.searchParams.get("index") || "0", 10);
+  const originalName = url.searchParams.get("name") || "asset.bin";
+  if (!request.body || !["image", "narration", "music"].includes(kind || "")) {
+    return Response.json({ error: "Upload inválido." }, { status: 400 });
+  }
+
+  const extension = path.extname(originalName).toLowerCase();
+  const safeExtension = /^\.[a-z0-9]{1,6}$/.test(extension) ? extension : ".bin";
+  const fileName = kind === "image" ? `image-${index}${safeExtension}` : `${kind}${safeExtension}`;
+  const directory = uploadDirectory(id);
+  const target = path.join(directory, fileName);
+  try {
+    await fs.mkdir(directory, { recursive: true });
+    await pipeline(Readable.fromWeb(request.body as never), createWriteStream(target));
+    return Response.json({ fileName }, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    await fs.unlink(target).catch(() => {});
+    const message = error instanceof Error ? error.message : "Falha ao receber arquivo.";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
 
 function numberInRange(value: unknown, fallback: number, min: number, max: number): number {
@@ -165,9 +205,11 @@ async function runFfmpeg(
 export async function handleFetchRender(request: Request): Promise<Response> {
   const binary = getFfmpegPath();
   if (!binary) return Response.json({ error: "FFmpeg não disponível." }, { status: 503 });
-  const idParam = new URL(request.url).searchParams.get("id") || "";
-  const id = /^[a-zA-Z0-9-]{1,64}$/.test(idParam) ? idParam : randomUUID();
-  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `studio-render-${id}-`));
+  const id = safeJobId(new URL(request.url).searchParams.get("id"));
+  const preparedDirectory = uploadDirectory(id);
+  const workDir = (await fs.stat(preparedDirectory).catch(() => null))?.isDirectory()
+    ? preparedDirectory
+    : await fs.mkdtemp(path.join(os.tmpdir(), `studio-render-${id}-`));
   activeJobs.set(id, { status: "uploading", timeSec: 0, fps: 0, speed: "0x" });
   try {
     const form = await request.formData();
@@ -175,28 +217,42 @@ export async function handleFetchRender(request: Request): Promise<Response> {
       JSON.parse(String(form.get("metadata") || "{}")),
       form.get("duration"),
     );
-    const images = form.getAll("images").filter((value): value is File => value instanceof File);
+    const imageEntries = form.getAll("images");
     const narration = form.get("narration");
     const music = form.get("music");
-    if (!images.length || !(narration instanceof File)) {
+    if (!imageEntries.length || (!safeStoredName(narration) && !(narration instanceof File))) {
       throw new Error("Imagens ou narração não foram recebidas pelo servidor.");
     }
-    if (images.length > 200) throw new Error("O limite é de 200 imagens por vídeo.");
+    if (imageEntries.length > 200) throw new Error("O limite é de 200 imagens por vídeo.");
 
     const imagePaths: string[] = [];
-    for (let index = 0; index < images.length; index += 1) {
-      const file = images[index]!;
-      const filePath = path.join(
-        workDir,
-        `image-${String(index).padStart(3, "0")}${extensionFor(file, ".img")}`,
-      );
-      await fs.writeFile(filePath, Buffer.from(await file.arrayBuffer()));
+    for (let index = 0; index < imageEntries.length; index += 1) {
+      const entry = imageEntries[index]!;
+      const storedName = safeStoredName(entry);
+      const filePath = storedName
+        ? path.join(workDir, storedName)
+        : path.join(
+            workDir,
+            `image-${String(index).padStart(3, "0")}${extensionFor(entry as File, ".img")}`,
+          );
+      if (entry instanceof File)
+        await fs.writeFile(filePath, Buffer.from(await entry.arrayBuffer()));
+      else await fs.access(filePath);
       imagePaths.push(filePath);
     }
-    const narrationPath = path.join(workDir, `narration${extensionFor(narration, ".audio")}`);
-    await fs.writeFile(narrationPath, Buffer.from(await narration.arrayBuffer()));
+    const storedNarration = safeStoredName(narration);
+    const narrationPath = storedNarration
+      ? path.join(workDir, storedNarration)
+      : path.join(workDir, `narration${extensionFor(narration as File, ".audio")}`);
+    if (narration instanceof File)
+      await fs.writeFile(narrationPath, Buffer.from(await narration.arrayBuffer()));
+    else await fs.access(narrationPath);
     let musicPath: string | null = null;
-    if (music instanceof File && music.size > 0) {
+    const storedMusic = safeStoredName(music);
+    if (storedMusic) {
+      musicPath = path.join(workDir, storedMusic);
+      await fs.access(musicPath);
+    } else if (music instanceof File && music.size > 0) {
       musicPath = path.join(workDir, `music${extensionFor(music, ".audio")}`);
       await fs.writeFile(musicPath, Buffer.from(await music.arrayBuffer()));
     }
@@ -212,7 +268,7 @@ export async function handleFetchRender(request: Request): Promise<Response> {
       workDir,
       metadata.format === "webm" ? "output.webm" : "output.mp4",
     );
-    const perImage = metadata.duration / images.length;
+    const perImage = metadata.duration / imagePaths.length;
     // A superfície 2x reduz o arredondamento do zoompan que fazia o centro
     // oscilar entre pixels e dava a impressão de imagem tremendo.
     const scaledWidth = metadata.width * 2;
@@ -221,7 +277,7 @@ export async function handleFetchRender(request: Request): Promise<Response> {
     const segmentPaths: string[] = [];
     activeJobs.set(id, { status: "encoding", timeSec: 0, fps: 0, speed: "1x" });
     console.log(
-      `[render-service] job=${id} iniciando ${images.length} segmentos em ${metadata.width}x${metadata.height}@${metadata.fps}`,
+      `[render-service] job=${id} iniciando ${imagePaths.length} segmentos em ${metadata.width}x${metadata.height}@${metadata.fps}`,
     );
 
     for (let index = 0; index < imagePaths.length; index += 1) {
