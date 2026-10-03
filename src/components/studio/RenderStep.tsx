@@ -54,7 +54,10 @@ export function RenderStep() {
 
   const previewRef = useRef<HTMLCanvasElement>(null);
   const cancelRef = useRef({ cancelled: false });
-  const [renderStage, setRenderStage] = useState<"rendering" | "encoding">("rendering");
+  const [renderStage, setRenderStage] = useState<"preparing" | "uploading" | "encoding">(
+    "preparing",
+  );
+  const [renderDetail, setRenderDetail] = useState("");
 
   // O preview é apenas uma amostra visual leve. A exportação completa continua
   // sendo feita exclusivamente pelo FFmpeg nativo no servidor.
@@ -92,7 +95,8 @@ export function RenderStep() {
     setError(null);
     setResult(null);
     setProgress(0);
-    setRenderStage("rendering");
+    setRenderStage("preparing");
+    setRenderDetail("");
     setRendering(true);
     cancelRef.current = { cancelled: false };
 
@@ -111,8 +115,9 @@ export function RenderStep() {
         kenBurns,
         fade: Math.min(0.6, perImage / 4),
         format: preferredFormat,
-        onProgress: (value) => {
-          setRenderStage("encoding");
+        onProgress: (value, stage, detail) => {
+          setRenderStage(stage);
+          setRenderDetail(detail || "");
           setProgress(value * 100);
         },
         cancelRef: cancelRef.current,
@@ -344,19 +349,27 @@ export function RenderStep() {
           <div className="flex flex-wrap items-center justify-between text-xs mb-2 gap-2">
             <span className="font-semibold flex items-center gap-1.5 text-primary">
               <Sparkles className="size-3.5 animate-pulse text-primary" />
-              {renderStage === "rendering"
-                ? "Preparando mídias para envio ao servidor..."
-                : `Montando vídeo no FFmpeg do servidor (${Math.round(progress)}%)`}
+              {renderStage === "preparing"
+                ? `Preparando mídias (${Math.round(progress)}%)`
+                : renderStage === "uploading"
+                  ? "Enviando mídias ao servidor..."
+                  : `Montando vídeo no FFmpeg do servidor (${Math.round(progress)}%)`}
             </span>
             <span className="text-foreground/80 font-mono font-medium text-xs bg-background/80 px-2 py-0.5 rounded border border-border">
-              {`${formatTime(Math.min(duration, (progress / 100) * duration))} / ${formatTime(duration)}`}
+              {renderStage === "encoding"
+                ? `${formatTime(Math.min(duration, (progress / 100) * duration))} / ${formatTime(duration)}`
+                : renderStage === "preparing"
+                  ? renderDetail || "Preparação local"
+                  : "Aguardando o servidor"}
             </span>
           </div>
           <Progress value={progress} className="h-2.5" />
           <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
-            {renderStage === "rendering"
-              ? "Enviando imagens, narração, música e tempos das legendas..."
-              : "Gerando imagens, legendas e áudio em H.264/AAC no FFmpeg nativo do servidor."}
+            {renderStage === "preparing"
+              ? "Convertendo uma mídia por vez no navegador, sem executar o FFmpeg localmente."
+              : renderStage === "uploading"
+                ? "O pacote foi preparado e está sendo enviado ao servidor."
+                : "Gerando imagens, legendas e áudio em H.264/AAC no FFmpeg nativo do servidor."}
           </p>
         </div>
       )}
