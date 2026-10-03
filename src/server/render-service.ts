@@ -321,7 +321,7 @@ export async function handleFetchRender(request: Request): Promise<Response> {
       segmentPaths.push(segmentPath);
       const job = activeJobs.get(id);
       if (job) job.timeSec = ((index + 1) * perImage) / 2;
-      console.log(`[render-service] job=${id} segmento ${index + 1}/${images.length} concluído`);
+      console.log(`[render-service] job=${id} segmento ${index + 1}/${imagePaths.length} concluído`);
     }
 
     const concatListPath = path.join(workDir, "segments.txt");
