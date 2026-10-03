@@ -1,22 +1,9 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { activeJobs, getFfmpegPath } from "./transcode-service";
-
-const runningRenderProcesses = new Map<string, ChildProcess>();
-const cancelledRenderJobs = new Set<string>();
-const completedRenders = new Map<
-  string,
-  { data: Uint8Array; contentType: string; expiresAt: number }
->();
-
-function renderJobId(url: URL): string {
-  const candidate =
-    url.searchParams.get("id") || url.pathname.split("/").filter(Boolean).at(-1) || "";
-  return /^[a-zA-Z0-9-]{1,64}$/.test(candidate) ? candidate : randomUUID();
-}
 
 interface CaptionInput {
   start: number;
@@ -151,10 +138,8 @@ async function runFfmpeg(
 ): Promise<void> {
   const binary = getFfmpegPath();
   if (!binary) throw new Error("FFmpeg nativo não está disponível no servidor.");
-  if (cancelledRenderJobs.has(jobId)) throw new Error("CANCELLED");
   await new Promise<void>((resolve, reject) => {
     const proc = spawn(binary, args, { stdio: ["ignore", "ignore", "pipe"] });
-    runningRenderProcesses.set(jobId, proc);
     let stderr = "";
     proc.stderr.on("data", (chunk) => {
       const text = chunk.toString();
@@ -170,9 +155,7 @@ async function runFfmpeg(
     });
     proc.on("error", (error) => reject(new Error(`Falha ao iniciar FFmpeg: ${error.message}`)));
     proc.on("close", (code) => {
-      runningRenderProcesses.delete(jobId);
-      if (cancelledRenderJobs.has(jobId)) reject(new Error("CANCELLED"));
-      else if (code === 0) resolve();
+      if (code === 0) resolve();
       else
         reject(new Error(`FFmpeg falhou (${code}): ${stderr.split("\n").slice(-10).join("\n")}`));
     });
@@ -182,7 +165,8 @@ async function runFfmpeg(
 export async function handleFetchRender(request: Request): Promise<Response> {
   const binary = getFfmpegPath();
   if (!binary) return Response.json({ error: "FFmpeg não disponível." }, { status: 503 });
-  const id = renderJobId(new URL(request.url));
+  const idParam = new URL(request.url).searchParams.get("id") || "";
+  const id = /^[a-zA-Z0-9-]{1,64}$/.test(idParam) ? idParam : randomUUID();
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `studio-render-${id}-`));
   activeJobs.set(id, { status: "uploading", timeSec: 0, fps: 0, speed: "0x" });
   try {
@@ -384,16 +368,6 @@ export async function handleFetchRender(request: Request): Promise<Response> {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Falha na montagem do vídeo.";
-    if (message === "CANCELLED") {
-      activeJobs.set(id, {
-        status: "error",
-        timeSec: activeJobs.get(id)?.timeSec || 0,
-        fps: 0,
-        speed: "0x",
-        error: "Montagem cancelada pelo usuário.",
-      });
-      return Response.json({ error: "Montagem cancelada pelo usuário." }, { status: 499 });
-    }
     activeJobs.set(id, { status: "error", timeSec: 0, fps: 0, speed: "0x", error: message });
     console.error("[render-service]", error);
     return Response.json({ error: message }, { status: 500 });
@@ -401,73 +375,4 @@ export async function handleFetchRender(request: Request): Promise<Response> {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     setTimeout(() => activeJobs.delete(id), 15000);
   }
-}
-
-export async function handleFetchRenderStart(request: Request): Promise<Response> {
-  const url = new URL(request.url);
-  const id = renderJobId(url);
-  cancelledRenderJobs.delete(id);
-  completedRenders.delete(id);
-
-  // O multipart é recebido integralmente antes de responder. Depois disso, a
-  // renderização fica desacoplada da conexão do navegador.
-  const form = await request.formData();
-  const internalRequest = new Request(`${url.origin}/api/render?id=${encodeURIComponent(id)}`, {
-    method: "POST",
-    body: form,
-  });
-
-  void handleFetchRender(internalRequest)
-    .then(async (response) => {
-      if (!response.ok || cancelledRenderJobs.has(id)) return;
-      const data = new Uint8Array(await response.arrayBuffer());
-      completedRenders.set(id, {
-        data,
-        contentType: response.headers.get("content-type") || "video/mp4",
-        expiresAt: Date.now() + 30 * 60 * 1000,
-      });
-    })
-    .catch((error) => {
-      const message = error instanceof Error ? error.message : "Falha na montagem do vídeo.";
-      activeJobs.set(id, { status: "error", timeSec: 0, fps: 0, speed: "0x", error: message });
-    });
-
-  return Response.json(
-    { id, status: "accepted" },
-    { status: 202, headers: { "Cache-Control": "no-store" } },
-  );
-}
-
-export function handleFetchRenderCancel(url: URL): Response {
-  const id = renderJobId(url);
-  cancelledRenderJobs.add(id);
-  completedRenders.delete(id);
-  const process = runningRenderProcesses.get(id);
-  if (process && !process.killed) process.kill("SIGKILL");
-  activeJobs.set(id, {
-    status: "error",
-    timeSec: activeJobs.get(id)?.timeSec || 0,
-    fps: 0,
-    speed: "0x",
-    error: "Montagem cancelada pelo usuário.",
-  });
-  console.log(`[render-service] job=${id} cancelado pelo usuário`);
-  return Response.json({ id, status: "cancelled" });
-}
-
-export function handleFetchRenderResult(url: URL): Response {
-  const id = renderJobId(url);
-  const result = completedRenders.get(id);
-  if (!result || result.expiresAt < Date.now()) {
-    if (result) completedRenders.delete(id);
-    return Response.json({ error: "Vídeo ainda não está disponível." }, { status: 404 });
-  }
-  completedRenders.delete(id);
-  return new Response(result.data, {
-    headers: {
-      "Content-Type": result.contentType,
-      "Content-Length": String(result.data.byteLength),
-      "Cache-Control": "no-store",
-    },
-  });
 }

@@ -21,7 +21,6 @@ interface ServerRenderOptions {
 interface RenderProgress {
   status: "uploading" | "encoding" | "done" | "error" | "not_found";
   timeSec?: number;
-  error?: string;
 }
 
 const API_BASE = String(import.meta.env.VITE_TRANSCODE_API_URL || "").replace(/\/$/, "");
@@ -79,57 +78,60 @@ export async function renderVideoOnServer(options: ServerRenderOptions): Promise
     );
   }
 
-  try {
-    options.onProgress?.(0.02);
-    const startResponse = await fetch(`${API_BASE}/api/render/start?id=${encodeURIComponent(id)}`, {
-      method: "POST",
-      body: form,
-    });
-    if (!startResponse.ok) throw new Error(await responseError(startResponse));
-
-    while (true) {
-      if (options.cancelRef?.cancelled) {
-        await fetch(`${API_BASE}/api/render/cancel/${encodeURIComponent(id)}`, {
-          method: "POST",
-          keepalive: true,
-        }).catch(() => {});
-        throw new Error("CANCELLED");
-      }
-
-      const statusResponse = await fetch(
-        `${API_BASE}/api/render/progress/${encodeURIComponent(id)}?timestamp=${Date.now()}`,
-        { cache: "no-store" },
-      );
-      if (!statusResponse.ok) throw new Error(await responseError(statusResponse));
-      const progress = (await statusResponse.json()) as RenderProgress;
-      if (progress.status === "error") throw new Error(progress.error || "Falha na montagem.");
+  const controller = new AbortController();
+  let finished = false;
+  let pollTimer = 0;
+  const poll = async () => {
+    if (finished) return;
+    if (options.cancelRef?.cancelled) {
+      controller.abort();
+      return;
+    }
+    try {
+      const query = new URLSearchParams({ id, timestamp: String(Date.now()) });
+      const response = await fetch(`${API_BASE}/api/render/progress?${query}`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const progress = (await response.json()) as RenderProgress;
       if (progress.status === "encoding" && options.duration > 0) {
         options.onProgress?.(
           Math.max(0.05, Math.min(0.99, (progress.timeSec || 0) / options.duration)),
         );
       }
-      if (progress.status === "done") {
-        for (let attempt = 0; attempt < 10; attempt += 1) {
-          const resultResponse = await fetch(
-            `${API_BASE}/api/render/result/${encodeURIComponent(id)}?timestamp=${Date.now()}`,
-            { cache: "no-store" },
-          );
-          if (resultResponse.ok) {
-            const blob = await resultResponse.blob();
-            if (!blob.size) throw new Error("O servidor retornou um vídeo vazio.");
-            options.onProgress?.(1);
-            return blob;
-          }
-          await new Promise((resolve) => window.setTimeout(resolve, 300));
-        }
-        throw new Error("O vídeo foi concluído, mas não ficou disponível para download.");
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    } catch (error) {
+      console.warn("Falha temporária ao atualizar o progresso da montagem.", error);
+      // A requisição principal fornece o erro definitivo.
+    } finally {
+      if (!finished) pollTimer = window.setTimeout(() => void poll(), 1000);
     }
+  };
+
+  try {
+    options.onProgress?.(0.02);
+    const renderRequest = fetch(`${API_BASE}/api/render?id=${encodeURIComponent(id)}`, {
+      method: "POST",
+      body: form,
+      signal: controller.signal,
+    });
+    void poll();
+    const response = await renderRequest;
+    if (!response.ok) throw new Error(await responseError(response));
+    const blob = await response.blob();
+    if (!blob.size) throw new Error("O servidor retornou um vídeo vazio.");
+    options.onProgress?.(1);
+    return blob;
   } catch (error) {
-    if (options.cancelRef?.cancelled || (error instanceof Error && error.message === "CANCELLED")) {
+    if (
+      options.cancelRef?.cancelled ||
+      (error instanceof DOMException && error.name === "AbortError")
+    ) {
       throw new Error("CANCELLED");
     }
     throw error;
+  } finally {
+    finished = true;
+    if (pollTimer) window.clearTimeout(pollTimer);
   }
 }

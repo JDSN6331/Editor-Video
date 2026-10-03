@@ -19,7 +19,6 @@ export interface TranscodeJobProgress {
 }
 
 export const activeJobs = new Map<string, TranscodeJobProgress>();
-const lastProgressLog = new Map<string, number>();
 
 /**
  * Localiza o executável nativo do FFmpeg no sistema operacional
@@ -406,15 +405,6 @@ export async function handleFetchTranscodeStatus(): Promise<Response> {
 export async function handleFetchTranscodeProgress(url: URL): Promise<Response> {
   const id = url.searchParams.get("id");
   const job = id ? activeJobs.get(id) : null;
-  if (id && job) {
-    const previous = lastProgressLog.get(id) ?? -10;
-    if (job.status !== "encoding" || job.timeSec - previous >= 10) {
-      console.log(
-        `[render-progress] job=${id} status=${job.status} time=${job.timeSec.toFixed(2)}s`,
-      );
-      lastProgressLog.set(id, job.timeSec);
-    }
-  }
   return new Response(JSON.stringify(job || { status: "not_found" }), {
     status: 200,
     headers: {
@@ -423,52 +413,6 @@ export async function handleFetchTranscodeProgress(url: URL): Promise<Response> 
       "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
       Pragma: "no-cache",
       Expires: "0",
-    },
-  });
-}
-
-export function handleFetchRenderEvents(url: URL): Response {
-  const id = url.searchParams.get("id") || url.pathname.split("/").filter(Boolean).at(-1) || "";
-  const encoder = new TextEncoder();
-  let timer: ReturnType<typeof setInterval> | undefined;
-  let missingTicks = 0;
-
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const send = () => {
-        const job = activeJobs.get(id);
-        if (!job) {
-          missingTicks += 1;
-          controller.enqueue(encoder.encode("event: waiting\ndata: {}\n\n"));
-          if (missingTicks < 60) return;
-          if (timer) clearInterval(timer);
-          controller.close();
-          return;
-        }
-
-        missingTicks = 0;
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(job)}\n\n`));
-        if (job.status === "done" || job.status === "error") {
-          if (timer) clearInterval(timer);
-          controller.close();
-        }
-      };
-
-      send();
-      timer = setInterval(send, 1000);
-    },
-    cancel() {
-      if (timer) clearInterval(timer);
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-store, no-cache, must-revalidate",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-      "Access-Control-Allow-Origin": "*",
     },
   });
 }
