@@ -304,8 +304,9 @@ function buildAssRaw(captions: CaptionInput[], width: number, height: number): s
       })
       .join(" ");
     // Mantém as duas cores do texto totalmente opacas; somente o fundo usa alfa.
-    const opaqueText = "{\\1a&H00&\\2a&H00&\\1c&H3FD2FF&\\2c&HFFFFFF&}";
-    return `Dialogue: 0,${assTime(caption.start)},${assTime(caption.end)},Default,,0,0,0,,${opaqueText}${karaoke}`;
+    const captionColors =
+      "{\\alpha&H00&\\1a&H00&\\2a&H00&\\3a&H50&\\4a&H50&\\1c&H3FD2FF&\\2c&HFFFFFF&}";
+    return `Dialogue: 0,${assTime(caption.start)},${assTime(caption.end)},Default,,0,0,0,,${captionColors}${karaoke}`;
   });
   return `[Script Info]\nScriptType: v4.00+\nPlayResX: ${width}\nPlayResY: ${height}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,DejaVu Sans,${fontSize},&H003FD2FF,&H00F2F2F2,&H00101010,&H705C5C5C,-1,0,0,0,100,100,0,0,3,5,0,2,80,80,${marginV},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events.join("\n")}\n`;
 }
