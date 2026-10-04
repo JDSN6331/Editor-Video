@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useVideoProject, ACCENTS } from "@/contexts/VideoProjectContext";
 import { drawThumbnail } from "@/lib/video/thumbnail";
+import { downloadBlob } from "@/lib/utils";
 import { toast } from "sonner";
 
 export function ThumbnailStep() {
@@ -23,6 +24,7 @@ export function ThumbnailStep() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [thumbnailReady, setThumbnailReady] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -38,23 +40,37 @@ export function ThumbnailStep() {
     setThumbnailReady(true);
   }, [images, thumbIndex, thumbTitle, thumbSubtitle, accent]);
 
-  const handleDownload = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  const handleDownload = async () => {
+    const image = images[thumbIndex];
+    if (!image || isDownloading) return;
+    setIsDownloading(true);
     try {
-      // toDataURL é síncrono: o download permanece diretamente associado ao clique.
-      const url = canvas.toDataURL("image/png");
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "thumbnail.png";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      // Gera um canvas exclusivo para o arquivo. Assim o download não depende
+      // do canvas responsivo que está sendo exibido na interface.
+      const exportCanvas = document.createElement("canvas");
+      drawThumbnail(exportCanvas, {
+        image: image.element,
+        title: thumbTitle,
+        subtitle: thumbSubtitle,
+        accent,
+      });
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        exportCanvas.toBlob((value) => {
+          if (value) resolve(value);
+          else reject(new Error("O navegador não conseguiu criar o arquivo PNG."));
+        }, "image/png");
+      });
+      downloadBlob(blob, "thumbnail.png");
+      toast.success("Thumbnail baixada em PNG.");
     } catch (error) {
       console.error("Falha ao gerar thumbnail para download.", error);
       toast.error(
-        "Não foi possível gerar o PNG da thumbnail. Recarregue a imagem e tente novamente.",
+        error instanceof Error
+          ? error.message
+          : "Não foi possível gerar o PNG da thumbnail. Tente novamente.",
       );
+    } finally {
+      setIsDownloading(false);
     }
   };
 
@@ -127,8 +143,10 @@ export function ThumbnailStep() {
                 variant="secondary"
                 className="ml-auto"
                 onClick={handleDownload}
+                disabled={isDownloading}
               >
-                <Download className="size-4" /> Baixar thumbnail
+                <Download className="size-4" />
+                {isDownloading ? "Gerando PNG..." : "Baixar thumbnail"}
               </Button>
             ) : (
               <Button type="button" size="sm" variant="secondary" className="ml-auto" disabled>

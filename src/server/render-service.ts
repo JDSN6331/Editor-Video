@@ -282,7 +282,7 @@ function assText(value: string): string {
 function buildAssRaw(captions: CaptionInput[], width: number, height: number): string {
   const fontSize = Math.round(height * 0.055);
   const marginV = Math.round(height * 0.075);
-  const events = captions.map((caption) => {
+  const events = captions.flatMap((caption) => {
     const words = caption.text.trim().split(/\s+/).filter(Boolean);
     const totalCs = Math.max(1, Math.round((caption.end - caption.start) * 100));
     const totalChars = Math.max(
@@ -303,21 +303,18 @@ function buildAssRaw(captions: CaptionInput[], width: number, height: number): s
         return `{\\k${duration}}${assText(word)}`;
       })
       .join(" ");
-    // Mantém as duas cores do texto totalmente opacas; somente o fundo usa alfa.
-    const captionColors =
-      "{\\alpha&H00&\\1a&H00&\\2a&H00&\\3a&H50&\\4a&H50&\\1c&H3FD2FF&\\2c&HFFFFFF&}";
-    return `Dialogue: 0,${assTime(caption.start)},${assTime(caption.end)},Default,,0,0,0,,${captionColors}${karaoke}`;
+    const start = assTime(caption.start);
+    const end = assTime(caption.end);
+    const background = `Dialogue: 0,${start},${end},Background,,0,0,0,,${assText(caption.text)}`;
+    const opaqueText = "{\\alpha&H00&\\1c&H3FD2FF&\\2c&HFFFFFF&}";
+    const text = `Dialogue: 1,${start},${end},Text,,0,0,0,,${opaqueText}${karaoke}`;
+    return [background, text];
   });
-  return `[Script Info]\nScriptType: v4.00+\nPlayResX: ${width}\nPlayResY: ${height}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,DejaVu Sans,${fontSize},&H003FD2FF,&H00F2F2F2,&H00101010,&H705C5C5C,-1,0,0,0,100,100,0,0,3,5,0,2,80,80,${marginV},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events.join("\n")}\n`;
+  return `[Script Info]\nScriptType: v4.00+\nPlayResX: ${width}\nPlayResY: ${height}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Background,DejaVu Sans,${fontSize},&HFF000000,&HFF000000,&H50505050,&H50505050,-1,0,0,0,100,100,0,0,3,3,0,2,80,80,${marginV},1\nStyle: Text,DejaVu Sans,${fontSize},&H003FD2FF,&H00FFFFFF,&H00101010,&HFF000000,-1,0,0,0,100,100,0,0,1,3,0,2,80,80,${marginV},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events.join("\n")}\n`;
 }
 
 function buildAss(captions: CaptionInput[], width: number, height: number): string {
-  return buildAssRaw(captions, width, height)
-    .replace(
-      "&H003FD2FF,&H00F2F2F2,&H00101010,&H705C5C5C",
-      "&H003FD2FF,&H00FFFFFF,&H50505050,&H50505050",
-    )
-    .replace(",3,5,0,2,80,80,", ",3,3,0,2,80,80,");
+  return buildAssRaw(captions, width, height);
 }
 
 function escapeFilterPath(filePath: string): string {

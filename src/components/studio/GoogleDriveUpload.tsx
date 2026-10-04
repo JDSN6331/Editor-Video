@@ -42,6 +42,138 @@ interface GoogleDriveUploadProps {
   fileSize: number;
 }
 
+const DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
+const DOWNLOAD_CHUNK_TIMEOUT_MS = 120_000;
+
+async function readExactBytes(
+  response: Response,
+  expectedBytes: number,
+  onBytes: (count: number) => void,
+): Promise<Uint8Array> {
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    onBytes(bytes.byteLength);
+    return bytes;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value?.byteLength) continue;
+    chunks.push(value);
+    received += value.byteLength;
+    onBytes(value.byteLength);
+    if (received >= expectedBytes) {
+      void reader.cancel();
+      break;
+    }
+  }
+
+  if (received !== expectedBytes) {
+    throw new Error(`Transferência incompleta: recebidos ${received} de ${expectedBytes} bytes.`);
+  }
+
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
+async function downloadRenderedVideo(
+  videoUrl: string,
+  fileSize: number,
+  cancelState: { cancelled: boolean; abort?: () => void },
+  onProgress: (progress: DriveUploadProgress) => void,
+): Promise<Blob> {
+  if (!Number.isFinite(fileSize) || fileSize <= 0) {
+    throw new Error("O servidor não informou o tamanho válido do vídeo.");
+  }
+
+  const parts: BlobPart[] = [];
+  let loaded = 0;
+  let contentType = "video/mp4";
+
+  while (loaded < fileSize) {
+    if (cancelState.cancelled) throw new Error("Upload cancelado.");
+    const rangeStart = loaded;
+    const rangeEnd = Math.min(fileSize - 1, rangeStart + DOWNLOAD_CHUNK_SIZE - 1);
+    const expectedBytes = rangeEnd - rangeStart + 1;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), DOWNLOAD_CHUNK_TIMEOUT_MS);
+    cancelState.abort = () => controller.abort();
+
+    try {
+      const response = await fetch(videoUrl, {
+        cache: "no-store",
+        signal: controller.signal,
+        headers: {
+          Accept: "video/mp4, video/webm, application/octet-stream",
+          Range: `bytes=${rangeStart}-${rangeEnd}`,
+        },
+      });
+
+      if (!response.ok) {
+        let detail = "";
+        try {
+          const body = (await response.clone().json()) as { error?: string; message?: string };
+          detail = body.error || body.message || "";
+        } catch {
+          detail = (await response.text()).slice(0, 300);
+        }
+        throw new Error(
+          detail ||
+            `O servidor não disponibilizou o vídeo (HTTP ${response.status}). Monte novamente.`,
+        );
+      }
+
+      const responseType = (response.headers.get("content-type") || "").toLowerCase();
+      if (
+        responseType.includes("application/json") ||
+        responseType.startsWith("text/") ||
+        (!responseType.startsWith("video/") && !responseType.includes("application/octet-stream"))
+      ) {
+        throw new Error(
+          `O servidor respondeu com ${responseType || "um tipo desconhecido"}, não com um vídeo.`,
+        );
+      }
+      contentType = responseType || contentType;
+
+      // Se algum proxy remover o Range, aceitamos somente o arquivo completo e exato.
+      const bytesExpectedForResponse = response.status === 206 ? expectedBytes : fileSize;
+      const bytes = await readExactBytes(response, bytesExpectedForResponse, (count) => {
+        loaded += count;
+        onProgress({
+          percent: Math.min(100, Math.round((loaded / fileSize) * 100)),
+          loadedBytes: loaded,
+          totalBytes: fileSize,
+        });
+      });
+      parts.push(bytes);
+
+      if (response.status !== 206) break;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError" && !cancelState.cancelled) {
+        throw new Error("Um bloco do vídeo excedeu 2 minutos durante a transferência.");
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  const blob = new Blob(parts, { type: contentType });
+  if (blob.size !== fileSize) {
+    throw new Error(`O vídeo recebido está incompleto: ${blob.size} de ${fileSize} bytes.`);
+  }
+  return blob;
+}
+
 export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveUploadProps) {
   const [clientId, setClientId] = useState("");
   const [isConfigOpen, setIsConfigOpen] = useState(false);
@@ -110,83 +242,9 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
       const accessToken = await requestGoogleAccessToken(clientId);
       if (cancelRef.current.cancelled) throw new Error("Upload cancelado.");
 
-      // 1. Busca o vídeo no backend e valida a resposta antes de contatar o Drive.
-      const downloadController = new AbortController();
-      cancelRef.current.abort = () => downloadController.abort();
-      const res = await fetch(videoUrl, {
-        cache: "no-store",
-        signal: downloadController.signal,
-        headers: { Accept: "video/mp4, video/webm, application/octet-stream" },
-      });
-
-      if (!res.ok) {
-        let detail = "";
-        try {
-          const body = (await res.clone().json()) as { error?: string; message?: string };
-          detail = body.error || body.message || "";
-        } catch {
-          detail = (await res.text()).slice(0, 300);
-        }
-        throw new Error(
-          detail ||
-            `O servidor não disponibilizou o vídeo (HTTP ${res.status}). Monte o vídeo novamente.`,
-        );
-      }
-
-      const contentType = (res.headers.get("content-type") || "").toLowerCase();
-      if (
-        contentType.includes("application/json") ||
-        contentType.startsWith("text/") ||
-        (!contentType.startsWith("video/") && !contentType.includes("application/octet-stream"))
-      ) {
-        throw new Error(
-          `O servidor respondeu com ${contentType || "um tipo desconhecido"}, não com um vídeo.`,
-        );
-      }
-
-      const contentLength = res.headers.get("content-length");
-      const declaredSize = contentLength === null ? null : Number(contentLength);
-      if (
-        fileSize > 0 &&
-        declaredSize !== null &&
-        Number.isFinite(declaredSize) &&
-        declaredSize !== fileSize
-      ) {
-        throw new Error(
-          `O servidor disponibilizou apenas ${declaredSize} de ${fileSize} bytes do vídeo.`,
-        );
-      }
-
-      let blob: Blob;
-      if (res.body) {
-        const reader = res.body.getReader();
-        const chunks: BlobPart[] = [];
-        let loaded = 0;
-        const expectedBytes = declaredSize && declaredSize > 0 ? declaredSize : fileSize;
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            chunks.push(value);
-            loaded += value.byteLength;
-            setProgress({
-              percent:
-                expectedBytes > 0 ? Math.min(100, Math.round((loaded / expectedBytes) * 100)) : 0,
-              loadedBytes: loaded,
-              totalBytes: expectedBytes || loaded,
-            });
-            // Alguns proxies mantêm o stream aberto mesmo depois de entregar todos
-            // os bytes. O Content-Length/tamanho do resultado é a fonte de verdade.
-            if (expectedBytes > 0 && loaded >= expectedBytes) {
-              void reader.cancel();
-              break;
-            }
-          }
-        }
-        blob = new Blob(chunks, { type: contentType });
-      } else {
-        blob = await res.blob();
-      }
+      // 1. Busca o vídeo em blocos verificáveis. Isso evita conexões mantidas
+      // abertas pelo proxy depois de 100% dos bytes já terem chegado.
+      const blob = await downloadRenderedVideo(videoUrl, fileSize, cancelRef.current, setProgress);
       await validateVideoBlob(blob, fileName, fileSize);
 
       if (cancelRef.current.cancelled) {
