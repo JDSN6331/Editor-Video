@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useVideoProject, ACCENTS } from "@/contexts/VideoProjectContext";
 import { drawThumbnail } from "@/lib/video/thumbnail";
+import { toast } from "sonner";
 
 export function ThumbnailStep() {
   const {
@@ -40,17 +41,21 @@ export function ThumbnailStep() {
   const handleDownload = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
+    try {
+      // toDataURL é síncrono: o download permanece diretamente associado ao clique.
+      const url = canvas.toDataURL("image/png");
       const link = document.createElement("a");
       link.href = url;
       link.download = "thumbnail.png";
       document.body.appendChild(link);
       link.click();
       link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    }, "image/png");
+    } catch (error) {
+      console.error("Falha ao gerar thumbnail para download.", error);
+      toast.error(
+        "Não foi possível gerar o PNG da thumbnail. Recarregue a imagem e tente novamente.",
+      );
+    }
   };
 
   return (

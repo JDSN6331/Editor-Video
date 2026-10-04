@@ -162,18 +162,25 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
         const reader = res.body.getReader();
         const chunks: BlobPart[] = [];
         let loaded = 0;
+        const expectedBytes = declaredSize && declaredSize > 0 ? declaredSize : fileSize;
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
           if (value) {
             chunks.push(value);
             loaded += value.byteLength;
-            const total = declaredSize && declaredSize > 0 ? declaredSize : fileSize;
             setProgress({
-              percent: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+              percent:
+                expectedBytes > 0 ? Math.min(100, Math.round((loaded / expectedBytes) * 100)) : 0,
               loadedBytes: loaded,
-              totalBytes: total || loaded,
+              totalBytes: expectedBytes || loaded,
             });
+            // Alguns proxies mantêm o stream aberto mesmo depois de entregar todos
+            // os bytes. O Content-Length/tamanho do resultado é a fonte de verdade.
+            if (expectedBytes > 0 && loaded >= expectedBytes) {
+              void reader.cancel();
+              break;
+            }
           }
         }
         blob = new Blob(chunks, { type: contentType });
