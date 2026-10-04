@@ -15,6 +15,8 @@ RUN npm ci
 # Copy source code and build
 COPY . .
 ENV NITRO_PRESET=node-server
+ARG VITE_RENDER_API_URL
+ENV VITE_RENDER_API_URL=${VITE_RENDER_API_URL}
 RUN npm run build
 
 # Production runner stage
