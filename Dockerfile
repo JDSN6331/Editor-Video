@@ -36,6 +36,7 @@ RUN apt-get update && \
 
 # Copy built artifacts from builder stage
 COPY --from=builder /app/.output ./.output
+COPY --from=builder /app/node_modules/better-sqlite3/prebuilds ./.output/server/prebuilds
 COPY --from=builder /app/package.json ./package.json
 
 # Expose application port
