@@ -44,9 +44,9 @@ export function analyzeAudioSpeech(
   const {
     windowMs = 30,
     sensitivity = 0.12,
-    minSilenceSec = 0.35,
+    minSilenceSec = 0.3,
     minSpeechSec = 0.2,
-    padSec = 0.08,
+    padSec = 0.05,
   } = options;
 
   const duration = buffer.duration;
@@ -182,7 +182,8 @@ export function analyzeAudioSpeech(
   for (let i = 0; i < rawSegments.length; i++) {
     const raw = rawSegments[i];
     if (!raw) continue;
-    let start = Math.max(0, (raw.startWindow * windowMs) / 1000 - padSec);
+    // Pré-roll curto aproxima a legenda do ataque real da primeira palavra.
+    let start = Math.max(0, (raw.startWindow * windowMs) / 1000 - padSec * 0.4);
     const end = Math.min(duration, (raw.endWindow * windowMs) / 1000 + padSec);
 
     // Evita sobreposição com segmento anterior
@@ -233,6 +234,18 @@ function virtualSpeechToRealTime(vTime: number, segments: SpeechSegment[]): numb
   return lastSeg ? lastSeg.end : vTime;
 }
 
+/** Aproxima a duração falada por núcleos vocálicos, mais fiel que nº de caracteres. */
+function estimateSpeechUnits(text: string): number {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  return Math.max(
+    1,
+    words.reduce((total, word) => {
+      const vowelGroups = word.match(/[aeiouáéíóúâêôãõàü]+/gi)?.length ?? 0;
+      return total + Math.max(1, vowelGroups) + 0.12;
+    }, 0),
+  );
+}
+
 /**
  * Cria legendas sincronizadas com o áudio, respeitando pausas da narração.
  * Durante pausas longas do narrador, a legenda anterior é encerrada e a próxima
@@ -280,8 +293,10 @@ export function buildAudioSyncedCaptions(
     return { captions, pausesCount: 0 };
   }
 
-  // Distribui os blocos proporcionalmente APENAS sobre o tempo de fala ativa
-  const totalChars = blocks.reduce((sum, b) => sum + b.length, 0);
+  // Distribui pelo tempo de fala usando uma aproximação silábica. Palavras longas
+  // deixam de receber tempo excessivo apenas por terem mais caracteres.
+  const speechUnits = blocks.map(estimateSpeechUnits);
+  const totalUnits = speechUnits.reduce((sum, units) => sum + units, 0);
   let vCursor = 0;
 
   const captions: Caption[] = [];
@@ -289,7 +304,7 @@ export function buildAudioSyncedCaptions(
   for (let i = 0; i < blocks.length; i++) {
     const text = blocks[i] ?? "";
     const isLast = i === blocks.length - 1;
-    const vSlice = (text.length / totalChars) * totalSpeechSec;
+    const vSlice = ((speechUnits[i] ?? 1) / totalUnits) * totalSpeechSec;
 
     const vStart = vCursor;
     const vEnd = isLast ? totalSpeechSec : vCursor + vSlice;
@@ -309,7 +324,7 @@ export function buildAudioSyncedCaptions(
     }
 
     if (realEnd <= realStart) {
-      realEnd = realStart + Math.max(0.5, (text.length / totalChars) * 1.5);
+      realEnd = realStart + Math.max(0.5, ((speechUnits[i] ?? 1) / totalUnits) * 1.5);
     }
 
     captions.push({

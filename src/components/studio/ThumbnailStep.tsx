@@ -21,7 +21,7 @@ export function ThumbnailStep() {
   } = useVideoProject();
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
+  const [thumbnailReady, setThumbnailReady] = useState(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -34,27 +34,24 @@ export function ThumbnailStep() {
       accent,
     });
 
-    let disposed = false;
-    canvas.toBlob((blob) => {
-      if (disposed || !blob) return;
-      const nextUrl = URL.createObjectURL(blob);
-      setThumbnailUrl((previousUrl) => {
-        if (previousUrl) URL.revokeObjectURL(previousUrl);
-        return nextUrl;
-      });
-    }, "image/png");
-
-    return () => {
-      disposed = true;
-    };
+    setThumbnailReady(true);
   }, [images, thumbIndex, thumbTitle, thumbSubtitle, accent]);
 
-  useEffect(
-    () => () => {
-      if (thumbnailUrl) URL.revokeObjectURL(thumbnailUrl);
-    },
-    [thumbnailUrl],
-  );
+  const handleDownload = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "thumbnail.png";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }, "image/png");
+  };
 
   return (
     <StepCard
@@ -118,11 +115,15 @@ export function ThumbnailStep() {
                 </button>
               ))}
             </div>
-            {thumbnailUrl ? (
-              <Button asChild size="sm" variant="secondary" className="ml-auto">
-                <a href={thumbnailUrl} download="thumbnail.png">
-                  <Download className="size-4" /> Baixar thumbnail
-                </a>
+            {thumbnailReady ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="ml-auto"
+                onClick={handleDownload}
+              >
+                <Download className="size-4" /> Baixar thumbnail
               </Button>
             ) : (
               <Button type="button" size="sm" variant="secondary" className="ml-auto" disabled>

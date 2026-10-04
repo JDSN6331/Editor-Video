@@ -69,6 +69,8 @@ export function RenderStep() {
   const [renderDetail, setRenderDetail] = useState("");
   const [testingEffect, setTestingEffect] = useState<MotionEffect | null>(null);
   const [effectTestTime, setEffectTestTime] = useState(0);
+  const [smoothPreviewTime, setSmoothPreviewTime] = useState(0);
+  const smoothPreviewRef = useRef(0);
 
   useEffect(() => {
     if (!testingEffect || duration <= 0) return;
@@ -95,6 +97,27 @@ export function RenderStep() {
     return () => cancelAnimationFrame(frame);
   }, [duration, fps, images.length, perImage, testingEffect]);
 
+  // O servidor informa o tempo em amostras periódicas. Interpola apenas a exibição
+  // entre duas amostras; o progresso e o vídeo final continuam sendo os valores reais.
+  useEffect(() => {
+    if (!rendering || renderStage !== "encoding") return;
+    const from = smoothPreviewRef.current;
+    const to = Math.max(from, previewTime);
+    const startedAt = performance.now();
+    const transitionMs = 850;
+    let frame = 0;
+    const tick = (now: number) => {
+      const ratio = Math.min(1, (now - startedAt) / transitionMs);
+      const eased = ratio * ratio * (3 - 2 * ratio);
+      const next = from + (to - from) * eased;
+      smoothPreviewRef.current = next;
+      setSmoothPreviewTime(next);
+      if (ratio < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [previewTime, renderStage, rendering]);
+
   // O preview é apenas uma amostra visual leve. A exportação completa continua
   // sendo feita exclusivamente pelo FFmpeg nativo no servidor.
   useEffect(() => {
@@ -108,7 +131,11 @@ export function RenderStep() {
     drawFrame(
       context,
       images.map((image) => image.element),
-      testingEffect ? effectTestTime : rendering && renderStage === "encoding" ? previewTime : 0,
+      testingEffect
+        ? effectTestTime
+        : rendering && renderStage === "encoding"
+          ? smoothPreviewTime
+          : 0,
       duration,
       canvas.width,
       canvas.height,
@@ -127,7 +154,7 @@ export function RenderStep() {
     motionEffect,
     perImage,
     preset,
-    previewTime,
+    smoothPreviewTime,
     renderStage,
     rendering,
     result,
@@ -151,6 +178,8 @@ export function RenderStep() {
     setResult(null);
     setProgress(0);
     setPreviewTime(0);
+    smoothPreviewRef.current = 0;
+    setSmoothPreviewTime(0);
     setRenderStage("preparing");
     setRenderDetail("");
     setRendering(true);

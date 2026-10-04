@@ -232,6 +232,7 @@ export interface UploadOptions {
   folderName?: string;
   onProgress?: (progress: DriveUploadProgress) => void;
   cancelRef?: { cancelled: boolean; abort?: () => void };
+  accessToken?: string;
 }
 
 /** Impede que uma resposta de erro do backend seja enviada como se fosse vídeo. */
@@ -284,6 +285,7 @@ export async function uploadVideoToGoogleDrive(options: UploadOptions): Promise<
     folderName = DEFAULT_FOLDER_NAME,
     onProgress,
     cancelRef,
+    accessToken: suppliedAccessToken,
   } = options;
 
   if (cancelRef?.cancelled) {
@@ -292,7 +294,7 @@ export async function uploadVideoToGoogleDrive(options: UploadOptions): Promise<
 
   await validateVideoBlob(blob, fileName);
 
-  const accessToken = await requestGoogleAccessToken(clientId);
+  const accessToken = suppliedAccessToken || (await requestGoogleAccessToken(clientId));
 
   if (cancelRef?.cancelled) {
     throw new Error("Upload cancelado.");

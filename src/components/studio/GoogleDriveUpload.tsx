@@ -30,6 +30,8 @@ import {
   uploadVideoToGoogleDrive,
   clearGoogleAuthCache,
   validateVideoBlob,
+  loadGoogleIdentityScript,
+  requestGoogleAccessToken,
   type DriveUploadProgress,
   type DriveUploadResult,
 } from "@/lib/drive/googleDrive";
@@ -55,6 +57,7 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
   const [uploadResult, setUploadResult] = useState<DriveUploadResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [transferStage, setTransferStage] = useState<"downloading" | "uploading">("downloading");
 
   const cancelRef = useRef<{ cancelled: boolean; abort?: () => void }>({
     cancelled: false,
@@ -68,6 +71,10 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
       setInputClientId(saved);
     }
   }, []);
+
+  useEffect(() => {
+    if (clientId) void loadGoogleIdentityScript().catch(() => {});
+  }, [clientId]);
 
   const handleSaveConfig = () => {
     const clean = inputClientId.trim();
@@ -94,10 +101,15 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
 
     setUploadStatus("uploading");
     setErrorMessage(null);
+    setTransferStage("downloading");
     setProgress({ percent: 0, loadedBytes: 0, totalBytes: fileSize });
     cancelRef.current = { cancelled: false };
 
     try {
+      // Solicita autorização enquanto a ação ainda está ligada ao clique do usuário.
+      const accessToken = await requestGoogleAccessToken(clientId);
+      if (cancelRef.current.cancelled) throw new Error("Upload cancelado.");
+
       // 1. Busca o vídeo no backend e valida a resposta antes de contatar o Drive.
       const downloadController = new AbortController();
       cancelRef.current.abort = () => downloadController.abort();
@@ -145,7 +157,29 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
         );
       }
 
-      const blob = await res.blob();
+      let blob: Blob;
+      if (res.body) {
+        const reader = res.body.getReader();
+        const chunks: BlobPart[] = [];
+        let loaded = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            loaded += value.byteLength;
+            const total = declaredSize && declaredSize > 0 ? declaredSize : fileSize;
+            setProgress({
+              percent: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+              loadedBytes: loaded,
+              totalBytes: total || loaded,
+            });
+          }
+        }
+        blob = new Blob(chunks, { type: contentType });
+      } else {
+        blob = await res.blob();
+      }
       await validateVideoBlob(blob, fileName, fileSize);
 
       if (cancelRef.current.cancelled) {
@@ -153,6 +187,8 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
       }
 
       // 2. Realiza o upload para o Google Drive
+      setTransferStage("uploading");
+      setProgress({ percent: 0, loadedBytes: 0, totalBytes: blob.size });
       const result = await uploadVideoToGoogleDrive({
         blob,
         fileName,
@@ -162,6 +198,7 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
           setProgress(p);
         },
         cancelRef: cancelRef.current,
+        accessToken,
       });
 
       setUploadResult(result);
@@ -271,7 +308,9 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
           <div className="flex items-center justify-between text-xs mb-2">
             <span className="flex items-center gap-2 font-medium text-primary">
               <Loader2 className="size-3.5 animate-spin" />
-              Enviando vídeo para o Google Drive ({progress.percent}%)
+              {transferStage === "downloading"
+                ? `Preparando vídeo para envio (${progress.percent}%)`
+                : `Enviando vídeo para o Google Drive (${progress.percent}%)`}
             </span>
             <span className="font-mono text-muted-foreground">
               {(progress.loadedBytes / 1024 / 1024).toFixed(1)} MB de{" "}
@@ -283,7 +322,9 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
 
           <div className="mt-2.5 flex items-center justify-between">
             <p className="text-[11px] text-muted-foreground">
-              Upload direto e resumível. O arquivo será salvo na pasta "Editor de Vídeo".
+              {transferStage === "downloading"
+                ? "Transferindo o vídeo do servidor de renderização para o navegador."
+                : 'Upload direto e resumível. O arquivo será salvo na pasta "Editor de Vídeo".'}
             </p>
             <Button
               variant="ghost"
