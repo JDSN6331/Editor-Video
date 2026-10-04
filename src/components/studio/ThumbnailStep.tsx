@@ -9,6 +9,21 @@ import { drawThumbnail } from "@/lib/video/thumbnail";
 import { downloadBlob } from "@/lib/utils";
 import { toast } from "sonner";
 
+type NativeSaveFileHandle = {
+  createWritable: () => Promise<{
+    write: (data: Blob) => Promise<void>;
+    close: () => Promise<void>;
+  }>;
+};
+
+type NativeSavePicker = (options: {
+  suggestedName: string;
+  types: Array<{
+    description: string;
+    accept: Record<string, string[]>;
+  }>;
+}) => Promise<NativeSaveFileHandle>;
+
 export function ThumbnailStep() {
   const {
     images,
@@ -43,6 +58,23 @@ export function ThumbnailStep() {
   const handleDownload = async () => {
     const image = images[thumbIndex];
     if (!image || isDownloading) return;
+
+    // O seletor precisa ser aberto diretamente durante o clique. Se esperarmos
+    // o PNG ficar pronto, o Chrome pode considerar que a ativação expirou.
+    const nativeSavePicker = (window as Window & { showSaveFilePicker?: NativeSavePicker })
+      .showSaveFilePicker;
+    const fileHandlePromise = nativeSavePicker
+      ? nativeSavePicker.call(window, {
+          suggestedName: "thumbnail.png",
+          types: [
+            {
+              description: "Imagem PNG",
+              accept: { "image/png": [".png"] },
+            },
+          ],
+        })
+      : null;
+
     setIsDownloading(true);
     try {
       // Gera um canvas exclusivo para o arquivo. Assim o download não depende
@@ -60,9 +92,21 @@ export function ThumbnailStep() {
           else reject(new Error("O navegador não conseguiu criar o arquivo PNG."));
         }, "image/png");
       });
-      downloadBlob(blob, "thumbnail.png");
-      toast.success("Thumbnail baixada em PNG.");
+      if (fileHandlePromise) {
+        const fileHandle = await fileHandlePromise;
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        toast.success("Thumbnail salva em PNG.");
+      } else {
+        downloadBlob(blob, "thumbnail.png");
+        toast.success("Thumbnail baixada em PNG.");
+      }
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        toast.info("Salvamento da thumbnail cancelado.");
+        return;
+      }
       console.error("Falha ao gerar thumbnail para download.", error);
       toast.error(
         error instanceof Error
