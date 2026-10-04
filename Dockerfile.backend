@@ -1,7 +1,7 @@
-FROM node:20-bookworm-slim
+FROM node:20-bookworm-slim AS builder
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+  && apt-get install -y --no-install-recommends python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -11,7 +11,17 @@ RUN npm ci
 
 COPY backend ./backend
 COPY src/server ./src/server
-RUN npm run build:backend && npm prune --omit=dev
+RUN npm run build:backend
+
+FROM node:20-bookworm-slim AS runner
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /app/dist ./dist
 
 ENV NODE_ENV=production
 ENV RENDER_HOST=0.0.0.0
@@ -20,4 +30,4 @@ ENV RENDER_DATA_DIR=/app/data/render-jobs
 ENV RENDER_RESULT_TTL_HOURS=24
 EXPOSE 3001
 
-CMD ["npm", "run", "start:backend"]
+CMD ["node", "dist/render-backend.mjs"]
