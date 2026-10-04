@@ -7,6 +7,9 @@ import {
   getRenderResultInfo,
   cancelRenderJob,
   sanitizeDownloadName,
+  startGoogleDriveUpload,
+  getGoogleDriveUploadState,
+  cancelGoogleDriveUpload,
 } from "./render-service";
 
 function corsHeaders(req: IncomingMessage): Record<string, string> {
@@ -130,6 +133,51 @@ export async function handleNodeApi(req: IncomingMessage, res: ServerResponse): 
 
       const stream = createReadStream(info.path, { start: info.start, end: info.end });
       stream.pipe(res);
+      return true;
+    }
+
+    if (pathname === "/api/render/drive-upload" && method === "POST") {
+      const id = url.searchParams.get("id") || "";
+      const chunks: Buffer[] = [];
+      let total = 0;
+      for await (const chunk of req) {
+        const buffer = chunk as Buffer;
+        total += buffer.length;
+        if (total > 64 * 1024) throw new Error("Configuração do Drive muito grande.");
+        chunks.push(buffer);
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as {
+        accessToken?: string;
+        fileName?: string;
+        folderName?: string;
+      };
+      const state = await startGoogleDriveUpload(
+        id,
+        body.accessToken || "",
+        body.fileName || "video.mp4",
+        body.folderName || "Editor de Vídeo",
+      );
+      res.statusCode = 202;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Cache-Control", "no-store");
+      res.end(JSON.stringify(state));
+      return true;
+    }
+
+    if (pathname === "/api/render/drive-progress" && method === "GET") {
+      const id = url.searchParams.get("id") || "";
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Cache-Control", "no-store");
+      res.end(JSON.stringify(getGoogleDriveUploadState(id)));
+      return true;
+    }
+
+    if (pathname === "/api/render/drive-cancel" && method === "POST") {
+      cancelGoogleDriveUpload(url.searchParams.get("id") || "");
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
       return true;
     }
 

@@ -71,6 +71,36 @@ const CONCAT_WEIGHT = 0.02;
 const CORS_HEADERS = { "Access-Control-Allow-Origin": "*" };
 const RENDER_ROOT = process.env["RENDER_DATA_DIR"] || os.tmpdir();
 
+export interface DriveUploadState {
+  status: "uploading" | "done" | "error";
+  progress: number;
+  uploadedBytes: number;
+  totalBytes: number;
+  webViewLink?: string;
+  folderName?: string;
+  error?: string;
+}
+
+const driveUploads = new Map<string, DriveUploadState>();
+const cancelledDriveUploads = new Set<string>();
+const DRIVE_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
+const GOOGLE_REQUEST_TIMEOUT_MS = 120_000;
+
+async function googleFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GOOGLE_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("O Google Drive não respondeu em até 2 minutos.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function safeJobId(value: string | null): string {
   return value && /^[a-zA-Z0-9-]{1,64}$/.test(value) ? value : randomUUID();
 }
@@ -279,10 +309,19 @@ function assText(value: string): string {
     .replace(/\r?\n/g, "\\N");
 }
 
-function buildAssRaw(captions: CaptionInput[], width: number, height: number): string {
+function buildAss(
+  captions: CaptionInput[],
+  width: number,
+  height: number,
+): {
+  background: string;
+  text: string;
+} {
   const fontSize = Math.round(height * 0.055);
   const marginV = Math.round(height * 0.075);
-  const events = captions.flatMap((caption) => {
+  const backgroundEvents: string[] = [];
+  const textEvents: string[] = [];
+  for (const caption of captions) {
     const words = caption.text.trim().split(/\s+/).filter(Boolean);
     const totalCs = Math.max(1, Math.round((caption.end - caption.start) * 100));
     const totalChars = Math.max(
@@ -305,16 +344,19 @@ function buildAssRaw(captions: CaptionInput[], width: number, height: number): s
       .join(" ");
     const start = assTime(caption.start);
     const end = assTime(caption.end);
-    const background = `Dialogue: 0,${start},${end},Background,,0,0,0,,${assText(caption.text)}`;
+    backgroundEvents.push(
+      `Dialogue: 0,${start},${end},Background,,0,0,0,,${assText(caption.text)}`,
+    );
     const opaqueText = "{\\alpha&H00&\\1c&H3FD2FF&\\2c&HFFFFFF&}";
-    const text = `Dialogue: 1,${start},${end},Text,,0,0,0,,${opaqueText}${karaoke}`;
-    return [background, text];
-  });
-  return `[Script Info]\nScriptType: v4.00+\nPlayResX: ${width}\nPlayResY: ${height}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Background,DejaVu Sans,${fontSize},&HFF000000,&HFF000000,&H50505050,&H50505050,-1,0,0,0,100,100,0,0,3,3,0,2,80,80,${marginV},1\nStyle: Text,DejaVu Sans,${fontSize},&H003FD2FF,&H00FFFFFF,&H00101010,&HFF000000,-1,0,0,0,100,100,0,0,1,3,0,2,80,80,${marginV},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events.join("\n")}\n`;
-}
+    textEvents.push(`Dialogue: 0,${start},${end},Text,,0,0,0,,${opaqueText}${karaoke}`);
+  }
 
-function buildAss(captions: CaptionInput[], width: number, height: number): string {
-  return buildAssRaw(captions, width, height);
+  const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: ${width}\nPlayResY: ${height}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n`;
+  const eventHeader = `\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
+  return {
+    background: `${header}Style: Background,DejaVu Sans,${fontSize},&HFF000000,&HFF000000,&H50505050,&H50505050,-1,0,0,0,100,100,0,0,3,3,0,2,80,80,${marginV},1\n${eventHeader}${backgroundEvents.join("\n")}\n`,
+    text: `${header}Style: Text,DejaVu Sans,${fontSize},&H003FD2FF,&H00FFFFFF,&H00101010,&HFF000000,-1,0,0,0,100,100,0,0,1,3,0,2,80,80,${marginV},1\n${eventHeader}${textEvents.join("\n")}\n`,
+  };
 }
 
 function escapeFilterPath(filePath: string): string {
@@ -404,13 +446,14 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   const { id, workDir } = job;
   const { metadata, imagePaths, narrationPath, musicPath } = plan;
   const hasCaptions = Boolean(metadata.captions?.length);
-  const assPath = path.join(workDir, "captions.ass");
+  const captionBackgroundPath = path.join(workDir, "captions-background.ass");
+  const captionTextPath = path.join(workDir, "captions-text.ass");
   if (hasCaptions) {
-    await fs.writeFile(
-      assPath,
-      buildAss(metadata.captions!, metadata.width, metadata.height),
-      "utf8",
-    );
+    const ass = buildAss(metadata.captions!, metadata.width, metadata.height);
+    await Promise.all([
+      fs.writeFile(captionBackgroundPath, ass.background, "utf8"),
+      fs.writeFile(captionTextPath, ass.text, "utf8"),
+    ]);
   }
   const outputPath = path.join(workDir, metadata.format === "webm" ? "output.webm" : "output.mp4");
 
@@ -528,7 +571,10 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   if (musicPath) args.push("-stream_loop", "-1", "-i", musicPath);
   const filters: string[] = [];
   if (hasCaptions) {
-    filters.push(`[0:v]subtitles=filename='${escapeFilterPath(assPath)}'[videoout]`);
+    // Dois filtros sequenciais tornam a ordem inequívoca: primeiro a caixa
+    // translúcida; depois o texto branco/amarelo totalmente opaco.
+    filters.push(`[0:v]subtitles=filename='${escapeFilterPath(captionBackgroundPath)}'[captionbg]`);
+    filters.push(`[captionbg]subtitles=filename='${escapeFilterPath(captionTextPath)}'[videoout]`);
   }
   if (musicPath) {
     const fadeStart = Math.max(0, metadata.duration - 2);
@@ -882,6 +928,209 @@ export async function getRenderResultInfo(
     start,
     end,
   };
+}
+
+async function googleJson(response: Response, context: string): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`${context} (HTTP ${response.status}): ${text.slice(0, 500)}`);
+  }
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error(`${context}: resposta inválida do Google.`);
+  }
+}
+
+async function getOrCreateGoogleDriveFolder(
+  accessToken: string,
+  folderName: string,
+): Promise<string> {
+  const escapedName = folderName.replace(/'/g, "\\'");
+  const query = encodeURIComponent(
+    `name='${escapedName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+  );
+  const searchResponse = await googleFetch(
+    `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)&spaces=drive`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  const search = await googleJson(searchResponse, "Falha ao buscar a pasta no Google Drive");
+  const files = Array.isArray(search["files"])
+    ? (search["files"] as Array<Record<string, unknown>>)
+    : [];
+  const existingId = files[0]?.["id"];
+  if (typeof existingId === "string" && existingId) return existingId;
+
+  const createResponse = await googleFetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: folderName,
+      mimeType: "application/vnd.google-apps.folder",
+    }),
+  });
+  const created = await googleJson(createResponse, "Falha ao criar a pasta no Google Drive");
+  const createdId = created["id"];
+  if (typeof createdId !== "string" || !createdId) {
+    throw new Error("O Google Drive não devolveu o ID da pasta criada.");
+  }
+  return createdId;
+}
+
+async function uploadRenderToGoogleDrive(
+  id: string,
+  accessToken: string,
+  fileName: string,
+  folderName: string,
+): Promise<void> {
+  const state = driveUploads.get(id);
+  if (!state) return;
+  try {
+    const info = await getRenderResultInfo(id, null);
+    const stat = await fs.stat(info.path);
+    state.totalBytes = stat.size;
+    const folderId = await getOrCreateGoogleDriveFolder(accessToken, folderName);
+
+    const initResponse = await googleFetch(
+      "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json; charset=UTF-8",
+          "X-Upload-Content-Type": info.headers["Content-Type"] || "video/mp4",
+          "X-Upload-Content-Length": String(stat.size),
+        },
+        body: JSON.stringify({ name: fileName, parents: [folderId] }),
+      },
+    );
+    if (!initResponse.ok) {
+      throw new Error(
+        `Falha ao iniciar o envio ao Google Drive (HTTP ${initResponse.status}): ${(await initResponse.text()).slice(0, 500)}`,
+      );
+    }
+    const uploadUrl = initResponse.headers.get("location");
+    if (!uploadUrl) throw new Error("O Google Drive não devolveu a URL de upload.");
+
+    const file = await fs.open(info.path, "r");
+    let finalData: Record<string, unknown> | null = null;
+    try {
+      let position = 0;
+      while (position < stat.size) {
+        if (cancelledDriveUploads.has(id)) throw new Error("Upload cancelado.");
+        const length = Math.min(DRIVE_UPLOAD_CHUNK_SIZE, stat.size - position);
+        const buffer = Buffer.allocUnsafe(length);
+        const { bytesRead } = await file.read(buffer, 0, length, position);
+        if (bytesRead !== length) {
+          throw new Error(`Leitura incompleta do vídeo: ${bytesRead} de ${length} bytes.`);
+        }
+        const end = position + bytesRead - 1;
+        let uploadResponse: Response | null = null;
+        let uploadError: unknown = null;
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          try {
+            uploadResponse = await googleFetch(uploadUrl, {
+              method: "PUT",
+              redirect: "manual",
+              headers: {
+                "Content-Type": info.headers["Content-Type"] || "video/mp4",
+                "Content-Length": String(bytesRead),
+                "Content-Range": `bytes ${position}-${end}/${stat.size}`,
+              },
+              body: buffer,
+            });
+            if (uploadResponse.status < 500) break;
+            if (attempt < 3) await uploadResponse.body?.cancel();
+          } catch (error) {
+            uploadError = error;
+            uploadResponse = null;
+          }
+          if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+        }
+        if (!uploadResponse) {
+          throw uploadError instanceof Error
+            ? uploadError
+            : new Error("O Google Drive não respondeu durante o envio.");
+        }
+        if (uploadResponse.status === 200 || uploadResponse.status === 201) {
+          finalData = await googleJson(uploadResponse, "Resposta final inválida do Google Drive");
+        } else if (uploadResponse.status !== 308) {
+          throw new Error(
+            `Falha durante o envio ao Google Drive (HTTP ${uploadResponse.status}): ${(await uploadResponse.text()).slice(0, 500)}`,
+          );
+        }
+        position += bytesRead;
+        state.uploadedBytes = position;
+        state.progress = Math.min(100, Math.round((position / stat.size) * 100));
+      }
+    } finally {
+      await file.close();
+    }
+
+    const fileId = finalData?.["id"];
+    if (typeof fileId !== "string" || !fileId) {
+      throw new Error("O Google Drive concluiu o envio sem devolver o ID do arquivo.");
+    }
+    state.status = "done";
+    state.progress = 100;
+    state.webViewLink = `https://drive.google.com/file/d/${fileId}/view`;
+    state.folderName = folderName;
+  } catch (error) {
+    state.status = "error";
+    state.error = error instanceof Error ? error.message : "Falha ao enviar para o Google Drive.";
+  }
+}
+
+export async function startGoogleDriveUpload(
+  id: string,
+  accessToken: string,
+  fileName: string,
+  folderName = "Editor de Vídeo",
+): Promise<DriveUploadState> {
+  if (!accessToken.trim()) throw new Error("Token do Google não informado.");
+  const info = await getRenderResultInfo(id, null);
+  const stat = await fs.stat(info.path);
+  const current = driveUploads.get(id);
+  if (current?.status === "uploading") return current;
+  const state: DriveUploadState = {
+    status: "uploading",
+    progress: 0,
+    uploadedBytes: 0,
+    totalBytes: stat.size,
+  };
+  driveUploads.set(id, state);
+  cancelledDriveUploads.delete(id);
+  void uploadRenderToGoogleDrive(
+    id,
+    accessToken,
+    sanitizeDownloadName(fileName, info.format),
+    folderName,
+  );
+  return state;
+}
+
+export function cancelGoogleDriveUpload(id: string): void {
+  cancelledDriveUploads.add(id);
+  const state = driveUploads.get(id);
+  if (state?.status === "uploading") {
+    state.status = "error";
+    state.error = "Upload cancelado.";
+  }
+}
+
+export function getGoogleDriveUploadState(id: string): DriveUploadState {
+  return (
+    driveUploads.get(id) || {
+      status: "error",
+      progress: 0,
+      uploadedBytes: 0,
+      totalBytes: 0,
+      error: "Envio ao Google Drive não encontrado.",
+    }
+  );
 }
 
 /** Entrega o vídeo pronto por streaming, com suporte a Range (permite buscar no player). */
