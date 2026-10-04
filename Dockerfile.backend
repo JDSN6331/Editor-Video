@@ -1,5 +1,7 @@
 FROM node:20-bookworm-slim AS builder
 
+ARG GIT_SHA=unknown
+
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
@@ -11,9 +13,16 @@ RUN npm ci
 
 COPY backend ./backend
 COPY src/server ./src/server
-RUN npm run build:backend
+RUN grep -q '"/api/render/drive-progress"' src/server/node-handler.ts \
+  && echo "Building backend revision ${GIT_SHA}" \
+  && npm run build:backend \
+  && grep -q '/api/render/drive-progress' dist/render-backend.mjs \
+  && printf '%s\n' "${GIT_SHA}" > /app/BUILD_SHA
 
 FROM node:20-bookworm-slim AS runner
+
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
@@ -22,6 +31,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/BUILD_SHA ./BUILD_SHA
 
 ENV NODE_ENV=production
 ENV RENDER_HOST=0.0.0.0
