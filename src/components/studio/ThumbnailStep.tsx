@@ -11,9 +11,10 @@ import { toast } from "sonner";
 
 type NativeSaveFileHandle = {
   createWritable: () => Promise<{
-    write: (data: Blob) => Promise<void>;
+    write: (data: ArrayBuffer) => Promise<void>;
     close: () => Promise<void>;
   }>;
+  getFile: () => Promise<File>;
 };
 
 type NativeSavePicker = (options: {
@@ -58,27 +59,10 @@ export function ThumbnailStep() {
   const handleDownload = async () => {
     const image = images[thumbIndex];
     if (!image || isDownloading) return;
-
-    // O seletor precisa ser aberto diretamente durante o clique. Se esperarmos
-    // o PNG ficar pronto, o Chrome pode considerar que a ativação expirou.
-    const nativeSavePicker = (window as Window & { showSaveFilePicker?: NativeSavePicker })
-      .showSaveFilePicker;
-    const fileHandlePromise = nativeSavePicker
-      ? nativeSavePicker.call(window, {
-          suggestedName: "thumbnail.png",
-          types: [
-            {
-              description: "Imagem PNG",
-              accept: { "image/png": [".png"] },
-            },
-          ],
-        })
-      : null;
-
     setIsDownloading(true);
     try {
-      // Gera um canvas exclusivo para o arquivo. Assim o download não depende
-      // do canvas responsivo que está sendo exibido na interface.
+      // Toda a geração acontece sincronamente dentro do clique. Quando a caixa
+      // "Salvar como" abrir, os bytes do PNG já estarão completos e validados.
       const exportCanvas = document.createElement("canvas");
       drawThumbnail(exportCanvas, {
         image: image.element,
@@ -86,20 +70,55 @@ export function ThumbnailStep() {
         subtitle: thumbSubtitle,
         accent,
       });
-      const blob = await new Promise<Blob>((resolve, reject) => {
-        exportCanvas.toBlob((value) => {
-          if (value) resolve(value);
-          else reject(new Error("O navegador não conseguiu criar o arquivo PNG."));
-        }, "image/png");
-      });
-      if (fileHandlePromise) {
-        const fileHandle = await fileHandlePromise;
+      const dataUrl = exportCanvas.toDataURL("image/png");
+      const encoded = dataUrl.slice(dataUrl.indexOf(",") + 1);
+      const binary = atob(encoded);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      const isPng =
+        bytes.length > 8 &&
+        bytes[0] === 0x89 &&
+        bytes[1] === 0x50 &&
+        bytes[2] === 0x4e &&
+        bytes[3] === 0x47 &&
+        bytes[4] === 0x0d &&
+        bytes[5] === 0x0a &&
+        bytes[6] === 0x1a &&
+        bytes[7] === 0x0a;
+      if (!isPng) throw new Error("A thumbnail gerada não contém um PNG válido.");
+
+      const pngBuffer = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
+      const nativeSavePicker = (window as Window & { showSaveFilePicker?: NativeSavePicker })
+        .showSaveFilePicker;
+
+      if (nativeSavePicker) {
+        const fileHandle = await nativeSavePicker.call(window, {
+          suggestedName: "thumbnail.png",
+          types: [
+            {
+              description: "Imagem PNG",
+              accept: { "image/png": [".png"] },
+            },
+          ],
+        });
         const writable = await fileHandle.createWritable();
-        await writable.write(blob);
+        await writable.write(pngBuffer);
         await writable.close();
+
+        const savedFile = await fileHandle.getFile();
+        if (savedFile.size !== bytes.byteLength) {
+          throw new Error(
+            `O arquivo salvo ficou incompleto: ${savedFile.size} de ${bytes.byteLength} bytes.`,
+          );
+        }
         toast.success("Thumbnail salva em PNG.");
       } else {
-        downloadBlob(blob, "thumbnail.png");
+        downloadBlob(new Blob([pngBuffer], { type: "image/png" }), "thumbnail.png");
         toast.success("Thumbnail baixada em PNG.");
       }
     } catch (error) {
