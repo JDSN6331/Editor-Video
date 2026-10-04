@@ -1,0 +1,23 @@
+FROM node:20-bookworm-slim
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY backend ./backend
+COPY src/server ./src/server
+RUN npm run build:backend && npm prune --omit=dev
+
+ENV NODE_ENV=production
+ENV RENDER_HOST=0.0.0.0
+ENV RENDER_PORT=3001
+ENV RENDER_DATA_DIR=/app/data/render-jobs
+ENV RENDER_RESULT_TTL_HOURS=24
+EXPOSE 3001
+
+CMD ["npm", "run", "start:backend"]

@@ -27,6 +27,7 @@ export function TimelineSidebar() {
     preset,
     fps,
     kenBurns,
+    motionEffect,
     previewTime,
     setPreviewTime,
   } = useVideoProject();
@@ -56,14 +57,24 @@ export function TimelineSidebar() {
         canvas.width,
         canvas.height,
         showCaptions ? captions : null,
-        { kenBurns, fade: Math.min(0.6, perImage / 4) },
+        { kenBurns, fade: Math.min(0.6, perImage / 4), motionEffect },
       );
     } catch (error) {
       // Preview e apenas uma conveniencia visual e nunca deve derrubar o editor.
       console.warn("Falha ao atualizar o preview da linha do tempo.", error);
       setIsPlayingPreview(false);
     }
-  }, [previewTime, duration, images, captions, showCaptions, kenBurns, perImage, showFramePreview]);
+  }, [
+    previewTime,
+    duration,
+    images,
+    captions,
+    showCaptions,
+    kenBurns,
+    motionEffect,
+    perImage,
+    showFramePreview,
+  ]);
 
   // Reprodução em tempo real no preview
   useEffect(() => {

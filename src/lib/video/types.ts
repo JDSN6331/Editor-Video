@@ -9,6 +9,7 @@ export interface SourceImage {
   name: string;
   url: string;
   dataUrl?: string;
+  blob?: Blob;
   element: HTMLImageElement;
 }
 
@@ -25,3 +26,5 @@ export const VIDEO_PRESETS = {
 } as const;
 
 export type PresetKey = keyof typeof VIDEO_PRESETS;
+
+export type MotionEffect = "ken-burns" | "zoom" | "pan" | "dissolve" | "zoom-out";

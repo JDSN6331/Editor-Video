@@ -29,6 +29,7 @@ import {
   saveGoogleClientId,
   uploadVideoToGoogleDrive,
   clearGoogleAuthCache,
+  validateVideoBlob,
   type DriveUploadProgress,
   type DriveUploadResult,
 } from "@/lib/drive/googleDrive";
@@ -97,9 +98,59 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
     cancelRef.current = { cancelled: false };
 
     try {
-      // 1. Busca o blob gerado do vídeo local
-      const res = await fetch(videoUrl);
+      // 1. Busca o vídeo no backend e valida a resposta antes de contatar o Drive.
+      const downloadController = new AbortController();
+      cancelRef.current.abort = () => downloadController.abort();
+      const res = await fetch(videoUrl, {
+        cache: "no-store",
+        signal: downloadController.signal,
+        headers: { Accept: "video/mp4, video/webm, application/octet-stream" },
+      });
+
+      if (!res.ok) {
+        let detail = "";
+        try {
+          const body = (await res.clone().json()) as { error?: string; message?: string };
+          detail = body.error || body.message || "";
+        } catch {
+          detail = (await res.text()).slice(0, 300);
+        }
+        throw new Error(
+          detail ||
+            `O servidor não disponibilizou o vídeo (HTTP ${res.status}). Monte o vídeo novamente.`,
+        );
+      }
+
+      const contentType = (res.headers.get("content-type") || "").toLowerCase();
+      if (
+        contentType.includes("application/json") ||
+        contentType.startsWith("text/") ||
+        (!contentType.startsWith("video/") && !contentType.includes("application/octet-stream"))
+      ) {
+        throw new Error(
+          `O servidor respondeu com ${contentType || "um tipo desconhecido"}, não com um vídeo.`,
+        );
+      }
+
+      const contentLength = res.headers.get("content-length");
+      const declaredSize = contentLength === null ? null : Number(contentLength);
+      if (
+        fileSize > 0 &&
+        declaredSize !== null &&
+        Number.isFinite(declaredSize) &&
+        declaredSize !== fileSize
+      ) {
+        throw new Error(
+          `O servidor disponibilizou apenas ${declaredSize} de ${fileSize} bytes do vídeo.`,
+        );
+      }
+
       const blob = await res.blob();
+      await validateVideoBlob(blob, fileName, fileSize);
+
+      if (cancelRef.current.cancelled) {
+        throw new Error("Upload cancelado.");
+      }
 
       // 2. Realiza o upload para o Google Drive
       const result = await uploadVideoToGoogleDrive({
@@ -137,9 +188,28 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
     setUploadStatus("idle");
   };
 
-  const handleCopyLink = () => {
+  const handleCopyLink = async () => {
     if (!uploadResult?.webViewLink) return;
-    navigator.clipboard.writeText(uploadResult.webViewLink);
+    const text = uploadResult.webViewLink;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        // Origens HTTP (ex.: IP da rede local) não expõem navigator.clipboard.
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        const copiedLegacy = document.execCommand("copy");
+        document.body.removeChild(area);
+        if (!copiedLegacy) throw new Error("copy failed");
+      }
+    } catch {
+      toast.error("Não foi possível copiar o link. Copie manualmente: " + text);
+      return;
+    }
     setCopied(true);
     toast.success("Link copiado para a área de transferência!");
     setTimeout(() => setCopied(false), 2500);
@@ -162,7 +232,7 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
               </span>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Economize espaço na Hostinger salvando seus vídeos direto no seu Google Drive.
+              Economize espaço no servidor da aplicação salvando seus vídeos direto no Google Drive.
             </p>
           </div>
         </div>
@@ -297,8 +367,8 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
               Conectar ao Google Drive
             </DialogTitle>
             <DialogDescription>
-              Como você já possui um projeto no Google Cloud Console, basta vincular seu Client ID
-              OAuth2. O processo é 100% gratuito.
+              Para conectar, crie ou selecione um projeto no Google Cloud Console e vincule um
+              Client ID OAuth2. O processo pode ser feito gratuitamente.
             </DialogDescription>
           </DialogHeader>
 
@@ -309,6 +379,10 @@ export function GoogleDriveUpload({ videoUrl, fileName, fileSize }: GoogleDriveU
                 Passo a passo no Google Cloud Console:
               </p>
               <ol className="list-decimal list-inside space-y-1.5 text-muted-foreground">
+                <li>
+                  Crie um <strong>novo projeto</strong>, caso ainda não tenha um, ou selecione um
+                  projeto existente no Google Cloud Console.
+                </li>
                 <li>
                   Acesse o{" "}
                   <a

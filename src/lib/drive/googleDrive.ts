@@ -234,6 +234,44 @@ export interface UploadOptions {
   cancelRef?: { cancelled: boolean; abort?: () => void };
 }
 
+/** Impede que uma resposta de erro do backend seja enviada como se fosse vídeo. */
+export async function validateVideoBlob(
+  blob: Blob,
+  fileName: string,
+  expectedSize?: number,
+): Promise<void> {
+  if (blob.size < 1024) {
+    throw new Error("O servidor não devolveu um vídeo válido (arquivo vazio ou incompleto).");
+  }
+
+  if (expectedSize && expectedSize > 0 && blob.size !== expectedSize) {
+    throw new Error(
+      `O vídeo recebido está incompleto: ${blob.size} de ${expectedSize} bytes. Monte o vídeo novamente.`,
+    );
+  }
+
+  const bytes = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+  const isMp4 =
+    bytes.length >= 8 &&
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70;
+  const isWebM =
+    bytes.length >= 4 &&
+    bytes[0] === 0x1a &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0xdf &&
+    bytes[3] === 0xa3;
+  const expectsWebM = fileName.toLowerCase().endsWith(".webm");
+
+  if ((expectsWebM && !isWebM) || (!expectsWebM && !isMp4)) {
+    throw new Error(
+      "O servidor devolveu um conteúdo que não é um vídeo válido. O arquivo não foi enviado ao Google Drive.",
+    );
+  }
+}
+
 /**
  * Realiza upload resumível de vídeo (MP4 ou WebM) diretamente para o Google Drive
  * com suporte a arquivos grandes e barra de progresso em tempo real.
@@ -251,6 +289,8 @@ export async function uploadVideoToGoogleDrive(options: UploadOptions): Promise<
   if (cancelRef?.cancelled) {
     throw new Error("Upload cancelado.");
   }
+
+  await validateVideoBlob(blob, fileName);
 
   const accessToken = await requestGoogleAccessToken(clientId);
 

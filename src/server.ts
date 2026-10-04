@@ -2,12 +2,7 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
-import {
-  handleFetchTranscode,
-  handleFetchTranscodeProgress,
-  handleFetchTranscodeStatus,
-} from "./server/transcode-service";
-import { handleFetchRender, handleFetchRenderUpload } from "./server/render-service";
+import { handleApiRequest } from "./server/api-router";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -52,39 +47,10 @@ function isH3SwallowedErrorBody(body: string): boolean {
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
+    console.log(`[server.ts fetch] ${request.method} ${new URL(request.url).pathname}`);
     try {
-      const url = new URL(request.url);
-      if (
-        (url.pathname.startsWith("/api/transcode") || url.pathname.startsWith("/api/render")) &&
-        request.method === "OPTIONS"
-      ) {
-        return new Response(null, {
-          status: 204,
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
-          },
-        });
-      }
-      if (url.pathname === "/api/transcode/status" && request.method === "GET") {
-        return handleFetchTranscodeStatus();
-      }
-      if (url.pathname === "/api/transcode/progress" && request.method === "GET") {
-        return handleFetchTranscodeProgress(url);
-      }
-      if (url.pathname === "/api/transcode" && request.method === "POST") {
-        return handleFetchTranscode(request);
-      }
-      if (url.pathname === "/api/render/progress" && request.method === "GET") {
-        return handleFetchTranscodeProgress(url);
-      }
-      if (url.pathname === "/api/render/upload" && request.method === "POST") {
-        return handleFetchRenderUpload(request);
-      }
-      if (url.pathname === "/api/render" && request.method === "POST") {
-        return handleFetchRender(request);
-      }
+      const apiResponse = await handleApiRequest(request);
+      if (apiResponse) return apiResponse;
 
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);

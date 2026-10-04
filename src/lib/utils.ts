@@ -11,6 +11,9 @@ export function downloadBlob(blob: Blob, filename: string) {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

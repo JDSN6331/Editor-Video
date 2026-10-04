@@ -1,4 +1,4 @@
-import type { Caption } from "./types";
+import type { Caption, MotionEffect } from "./types";
 
 /** Desenha a imagem cobrindo todo o quadro (crop central) com zoom opcional. */
 export function drawCover(
@@ -8,6 +8,7 @@ export function drawCover(
   h: number,
   zoom = 1,
   alpha = 1,
+  horizontalPosition = 0.5,
 ): boolean {
   const imageWidth = img.naturalWidth || img.width;
   const imageHeight = img.naturalHeight || img.height;
@@ -31,7 +32,8 @@ export function drawCover(
   ctx.save();
   try {
     ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
-    ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    const safePosition = Math.max(0, Math.min(1, horizontalPosition));
+    ctx.drawImage(img, (w - dw) * safePosition, (h - dh) / 2, dw, dh);
     return true;
   } catch (error) {
     console.warn("Nao foi possivel desenhar uma imagem no preview.", error);
@@ -78,7 +80,7 @@ export function drawCaption(
   const startY = h - bottomPad - blockHeight + lineHeight / 2;
 
   const boxTop = startY - lineHeight / 2 - fontSize * 0.35;
-  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillStyle = "rgba(72,72,72,0.7)";
   const boxWidth = Math.min(maxWidth + fontSize, w * 0.94);
   roundRect(
     ctx,
@@ -100,7 +102,7 @@ export function drawCaption(
     ctx.lineWidth = fontSize * 0.14;
     ctx.strokeStyle = "rgba(0,0,0,0.85)";
     ctx.strokeText(line, x, y);
-    ctx.fillStyle = "rgba(255,255,255,0.82)";
+    ctx.fillStyle = "#ffffff";
     ctx.fillText(line, x, y);
 
     const completedInLine = Math.max(
@@ -147,7 +149,10 @@ export function drawFrame(
   w: number,
   h: number,
   captions: Caption[] | null,
-  options: { kenBurns: boolean; fade: number } = { kenBurns: true, fade: 0.6 },
+  options: { kenBurns: boolean; fade: number; motionEffect?: MotionEffect } = {
+    kenBurns: true,
+    fade: 0.6,
+  },
 ) {
   if (!images.length || !Number.isFinite(duration) || duration <= 0) return;
   const safeTime = Math.max(0, Math.min(Number.isFinite(t) ? t : 0, duration));
@@ -159,15 +164,28 @@ export function drawFrame(
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, w, h);
 
-  const zoom = options.kenBurns ? 1 + 0.06 * progress : 1;
+  const easedProgress = progress * progress * (3 - 2 * progress);
+  const effect = options.motionEffect ?? (options.kenBurns ? "ken-burns" : "dissolve");
+  const zoom =
+    effect === "ken-burns"
+      ? 1.035 + 0.025 * easedProgress
+      : effect === "zoom"
+        ? 1 + 0.025 * easedProgress
+        : effect === "zoom-out"
+          ? 1.025 - 0.025 * easedProgress
+          : effect === "pan"
+            ? 1.06
+            : 1;
+  const horizontalPosition =
+    effect === "ken-burns" ? 0.2 + 0.6 * easedProgress : effect === "pan" ? easedProgress : 0.5;
   const current = images[index];
-  if (current) drawCover(ctx, current, w, h, zoom, 1);
+  if (current) drawCover(ctx, current, w, h, zoom, 1, horizontalPosition);
 
-  const fade = options.fade;
+  const fade = effect === "dissolve" ? options.fade : 0;
   const next = images[index + 1];
   if (next && fade > 0 && perImage - local < fade) {
     const alpha = 1 - (perImage - local) / fade;
-    drawCover(ctx, next, w, h, 1, alpha);
+    drawCover(ctx, next, w, h, 1, alpha, 0.5);
   }
 
   if (captions) {

@@ -7,10 +7,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { Caption, PresetKey, SourceImage } from "@/lib/video/types";
+import type { Caption, MotionEffect, PresetKey, SourceImage } from "@/lib/video/types";
 import { buildCaptions } from "@/lib/video/captions";
 import { buildAudioSyncedCaptions } from "@/lib/video/audioSync";
-import { decodeAudio } from "@/lib/video/render";
+import { decodeAudio } from "@/lib/video/audio";
+import { generateId } from "@/lib/uuid";
 import { getDbInfoFn, getProjectFn, saveProjectFn } from "@/api/projects";
 import { toast } from "sonner";
 
@@ -20,6 +21,7 @@ export interface AudioItem {
   name: string;
   url: string;
   dataUrl?: string;
+  blob?: Blob;
   buffer: AudioBuffer;
 }
 
@@ -96,6 +98,8 @@ interface VideoProjectContextType {
   setFps: (value: number) => void;
   kenBurns: boolean;
   setKenBurns: (value: boolean) => void;
+  motionEffect: MotionEffect;
+  setMotionEffect: (value: MotionEffect) => void;
   preferredFormat: "mp4" | "webm";
   setPreferredFormat: (value: "mp4" | "webm") => void;
 
@@ -192,7 +196,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   const [projectId, setProjectId] = useState<string>(() => {
     return (
       (typeof localStorage !== "undefined" && localStorage.getItem("current_project_id")) ||
-      crypto.randomUUID()
+      generateId()
     );
   });
   const [projectName, setProjectName] = useState("Novo vídeo");
@@ -224,7 +228,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   const [maxChars, setMaxChars] = useState(90);
   const [autoSyncCaptions, setAutoSyncCaptions] = useState(true);
   const [vadSensitivity, setVadSensitivity] = useState(0.12);
-  const [vadMinSilence, setVadMinSilence] = useState(0.35);
+  const [vadMinSilence, setVadMinSilence] = useState(0.45);
   const [customCaptions, setCustomCaptions] = useState<Caption[] | null>(null);
 
   // 5 — Música de fundo
@@ -237,6 +241,18 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   const [preset, setPreset] = useState<PresetKey>("1080p");
   const [fps, setFps] = useState(30);
   const [kenBurns, setKenBurns] = useState(true);
+  const [motionEffect, setMotionEffectState] = useState<MotionEffect>(() => {
+    const stored =
+      typeof localStorage !== "undefined" ? localStorage.getItem("motion_effect") : null;
+    return ["ken-burns", "zoom", "pan", "dissolve", "zoom-out"].includes(stored || "")
+      ? (stored as MotionEffect)
+      : "ken-burns";
+  });
+  const setMotionEffect = useCallback((value: MotionEffect) => {
+    setMotionEffectState(value);
+    setKenBurns(value !== "dissolve");
+    if (typeof localStorage !== "undefined") localStorage.setItem("motion_effect", value);
+  }, []);
   const [preferredFormat, setPreferredFormat] = useState<"mp4" | "webm">("mp4");
   const [previewTime, setPreviewTime] = useState(0);
 
@@ -392,10 +408,11 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
               const el = new Image();
               el.onload = () =>
                 resolve({
-                  id: `${file.name}-${crypto.randomUUID()}`,
+                  id: `${file.name}-${generateId()}`,
                   name: file.name,
                   url: dataUrl,
                   dataUrl,
+                  blob: file,
                   element: el,
                 });
               el.onerror = () => reject(new Error(`Não foi possível ler ${file.name}`));
@@ -488,6 +505,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
           name: file.name,
           url: dataUrl,
           dataUrl,
+          blob: file,
           buffer,
         };
         if (kind === "narration") setNarration(item);
@@ -729,7 +747,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
 
   /* ── Criar Novo Projeto ── */
   const createNewProject = useCallback(() => {
-    const newId = crypto.randomUUID();
+    const newId = generateId();
     setProjectId(newId);
     setProjectName("Novo vídeo");
     setScript("");
@@ -805,6 +823,8 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       setFps,
       kenBurns,
       setKenBurns,
+      motionEffect,
+      setMotionEffect,
       preferredFormat,
       setPreferredFormat,
       previewTime,
@@ -865,6 +885,8 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       preset,
       fps,
       kenBurns,
+      motionEffect,
+      setMotionEffect,
       preferredFormat,
       previewTime,
       rendering,

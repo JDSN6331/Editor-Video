@@ -16,6 +16,14 @@ export interface TranscodeJobProgress {
   fps: number;
   speed: string;
   error?: string;
+  /** Fração concluída (0..1) calculada pelo servidor — usada pela montagem de vídeo. */
+  progress?: number;
+  /** Etapa atual da montagem. */
+  stage?: "segments" | "concat" | "final" | "done";
+  /** Texto curto para a interface (ex.: "Cena 3 de 29"). */
+  detail?: string;
+  /** Tamanho do arquivo final em bytes (quando status === "done"). */
+  outputSize?: number;
 }
 
 export const activeJobs = new Map<string, TranscodeJobProgress>();

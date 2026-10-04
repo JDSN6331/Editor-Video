@@ -18,7 +18,7 @@ export function AboutSidebar() {
           <CheckCircle2 className="size-3.5 text-primary shrink-0 mt-0.5" />
           <span>
             <strong>Nuvem Google Drive:</strong> envio direto e automatizado para o Google Drive sem
-            ocupar espaço na Hostinger.
+            ocupar espaço no servidor da aplicação.
           </span>
         </li>
         <li className="flex items-start gap-2">

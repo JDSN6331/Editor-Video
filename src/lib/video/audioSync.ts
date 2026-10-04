@@ -325,7 +325,25 @@ export function buildAudioSyncedCaptions(
     const next = captions[i + 1];
     if (!curr || !next) continue;
 
-    if (next.start < curr.end) {
+    const averageBlockDuration = totalSpeechSec / Math.max(1, blocks.length);
+    const snapWindow = Math.max(0.75, Math.min(2.5, averageBlockDuration * 0.45));
+    const nearbyPause = pauses
+      .filter(
+        (pause) =>
+          pause.start > curr.start + 0.2 &&
+          pause.end < next.end - 0.2 &&
+          Math.abs((pause.start + pause.end) / 2 - next.start) <= snapWindow,
+      )
+      .sort(
+        (a, b) =>
+          Math.abs((a.start + a.end) / 2 - next.start) -
+          Math.abs((b.start + b.end) / 2 - next.start),
+      )[0];
+
+    if (nearbyPause) {
+      curr.end = Number(nearbyPause.start.toFixed(3));
+      next.start = Number(nearbyPause.end.toFixed(3));
+    } else if (next.start < curr.end) {
       const mid = (curr.end + next.start) / 2;
       curr.end = Number(mid.toFixed(3));
       next.start = Number(mid.toFixed(3));

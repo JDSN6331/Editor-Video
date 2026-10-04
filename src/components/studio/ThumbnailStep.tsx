@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download } from "lucide-react";
 import { StepCard } from "./StepCard";
 import { Button } from "@/components/ui/button";
@@ -6,7 +6,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useVideoProject, ACCENTS } from "@/contexts/VideoProjectContext";
 import { drawThumbnail } from "@/lib/video/thumbnail";
-import { downloadBlob } from "@/lib/utils";
 
 export function ThumbnailStep() {
   const {
@@ -22,6 +21,7 @@ export function ThumbnailStep() {
   } = useVideoProject();
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -33,7 +33,28 @@ export function ThumbnailStep() {
       subtitle: thumbSubtitle,
       accent,
     });
+
+    let disposed = false;
+    canvas.toBlob((blob) => {
+      if (disposed || !blob) return;
+      const nextUrl = URL.createObjectURL(blob);
+      setThumbnailUrl((previousUrl) => {
+        if (previousUrl) URL.revokeObjectURL(previousUrl);
+        return nextUrl;
+      });
+    }, "image/png");
+
+    return () => {
+      disposed = true;
+    };
   }, [images, thumbIndex, thumbTitle, thumbSubtitle, accent]);
+
+  useEffect(
+    () => () => {
+      if (thumbnailUrl) URL.revokeObjectURL(thumbnailUrl);
+    },
+    [thumbnailUrl],
+  );
 
   return (
     <StepCard
@@ -70,6 +91,7 @@ export function ThumbnailStep() {
             <span className="text-xs text-muted-foreground">Cor:</span>
             {ACCENTS.map((c) => (
               <button
+                type="button"
                 key={c}
                 onClick={() => setAccent(c)}
                 aria-label={`Cor ${c}`}
@@ -84,6 +106,7 @@ export function ThumbnailStep() {
             <div className="flex gap-1">
               {images.slice(0, 8).map((img, i) => (
                 <button
+                  type="button"
                   key={img.id}
                   onClick={() => setThumbIndex(i)}
                   className="overflow-hidden rounded border-2"
@@ -95,16 +118,17 @@ export function ThumbnailStep() {
                 </button>
               ))}
             </div>
-            <Button
-              size="sm"
-              variant="secondary"
-              className="ml-auto"
-              onClick={() =>
-                canvasRef.current?.toBlob((b) => b && downloadBlob(b, "thumbnail.png"), "image/png")
-              }
-            >
-              <Download className="size-4" /> Baixar thumbnail
-            </Button>
+            {thumbnailUrl ? (
+              <Button asChild size="sm" variant="secondary" className="ml-auto">
+                <a href={thumbnailUrl} download="thumbnail.png">
+                  <Download className="size-4" /> Baixar thumbnail
+                </a>
+              </Button>
+            ) : (
+              <Button type="button" size="sm" variant="secondary" className="ml-auto" disabled>
+                <Download className="size-4" /> Preparando thumbnail...
+              </Button>
+            )}
           </div>
         </div>
       )}

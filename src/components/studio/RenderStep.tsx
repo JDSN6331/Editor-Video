@@ -11,15 +11,21 @@ import {
 import { StepCard } from "./StepCard";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { useVideoProject } from "@/contexts/VideoProjectContext";
 import { formatTime } from "@/lib/video/captions";
-import { renderVideoOnServer } from "@/lib/video/server-render";
+import { renderVideoOnServer, buildDownloadUrl } from "@/lib/video/server-render";
 import { drawFrame } from "@/lib/video/draw";
-import { VIDEO_PRESETS, type PresetKey } from "@/lib/video/types";
-import { downloadBlob } from "@/lib/utils";
+import { VIDEO_PRESETS, type MotionEffect, type PresetKey } from "@/lib/video/types";
 import { GoogleDriveUpload } from "./GoogleDriveUpload";
+
+const MOTION_EFFECTS: Array<{ value: MotionEffect; label: string; detail: string }> = [
+  { value: "ken-burns", label: "Ken Burns", detail: "Zoom com deslocamento diagonal" },
+  { value: "zoom", label: "Zoom suave", detail: "Aproximação central discreta" },
+  { value: "pan", label: "Panorâmica", detail: "Movimento horizontal lento" },
+  { value: "dissolve", label: "Dissolução", detail: "Transição gradual entre imagens" },
+  { value: "zoom-out", label: "Zoom reverso", detail: "Afastamento central suave" },
+];
 
 export function RenderStep() {
   const {
@@ -38,13 +44,16 @@ export function RenderStep() {
     fps,
     setFps,
     kenBurns,
-    setKenBurns,
+    motionEffect,
+    setMotionEffect,
     preferredFormat,
     setPreferredFormat,
     rendering,
     setRendering,
     progress,
     setProgress,
+    previewTime,
+    setPreviewTime,
     result,
     setResult,
     error,
@@ -58,12 +67,39 @@ export function RenderStep() {
     "preparing",
   );
   const [renderDetail, setRenderDetail] = useState("");
+  const [testingEffect, setTestingEffect] = useState<MotionEffect | null>(null);
+  const [effectTestTime, setEffectTestTime] = useState(0);
+
+  useEffect(() => {
+    if (!testingEffect || duration <= 0) return;
+    const startedAt = performance.now();
+    const sampleDuration = 30;
+    const previewSpan = Math.min(duration, Math.max(0.1, perImage * Math.min(3, images.length)));
+    const previewFps = Math.max(24, Math.min(60, fps));
+    let lastDrawAt = 0;
+    let frame = 0;
+    const tick = (now: number) => {
+      const elapsed = (now - startedAt) / 1000;
+      if (elapsed >= sampleDuration) {
+        setEffectTestTime(0);
+        setTestingEffect(null);
+        return;
+      }
+      if (now - lastDrawAt >= 1000 / previewFps) {
+        lastDrawAt = now;
+        setEffectTestTime((elapsed / sampleDuration) * previewSpan);
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [duration, fps, images.length, perImage, testingEffect]);
 
   // O preview é apenas uma amostra visual leve. A exportação completa continua
   // sendo feita exclusivamente pelo FFmpeg nativo no servidor.
   useEffect(() => {
     const canvas = previewRef.current;
-    if (!canvas || result || !images.length || duration <= 0) return;
+    if (!canvas || (result && !testingEffect) || !images.length || duration <= 0) return;
     const { width, height } = VIDEO_PRESETS[preset];
     canvas.width = Math.round(width / 2);
     canvas.height = Math.round(height / 2);
@@ -72,14 +108,33 @@ export function RenderStep() {
     drawFrame(
       context,
       images.map((image) => image.element),
-      0,
+      testingEffect ? effectTestTime : rendering && renderStage === "encoding" ? previewTime : 0,
       duration,
       canvas.width,
       canvas.height,
       showCaptions ? captions : null,
-      { kenBurns, fade: Math.min(0.6, perImage / 4) },
+      {
+        kenBurns,
+        fade: Math.min(0.6, perImage / 4),
+        motionEffect: testingEffect ?? motionEffect,
+      },
     );
-  }, [captions, duration, images, kenBurns, perImage, preset, result, showCaptions]);
+  }, [
+    captions,
+    duration,
+    images,
+    kenBurns,
+    motionEffect,
+    perImage,
+    preset,
+    previewTime,
+    renderStage,
+    rendering,
+    result,
+    showCaptions,
+    effectTestTime,
+    testingEffect,
+  ]);
 
   // Validação dos requisitos para renderização
   const hasScript = Boolean(script.trim());
@@ -95,6 +150,7 @@ export function RenderStep() {
     setError(null);
     setResult(null);
     setProgress(0);
+    setPreviewTime(0);
     setRenderStage("preparing");
     setRenderDetail("");
     setRendering(true);
@@ -102,7 +158,7 @@ export function RenderStep() {
 
     try {
       const { width, height } = VIDEO_PRESETS[preset];
-      const outputBlob = await renderVideoOnServer({
+      const renderResult = await renderVideoOnServer({
         images,
         narration,
         music,
@@ -112,23 +168,29 @@ export function RenderStep() {
         width,
         height,
         fps,
+        duration,
         kenBurns,
+        motionEffect,
         fade: Math.min(0.6, perImage / 4),
         format: preferredFormat,
-        onProgress: (value, stage, detail) => {
+        onProgress: (value, stage, detail, timeSec) => {
           setRenderStage(stage);
           setRenderDetail(detail || "");
           setProgress(value * 100);
+          if (stage === "encoding" && Number.isFinite(timeSec)) {
+            setPreviewTime(Math.max(0, Math.min(duration, timeSec ?? 0)));
+          }
         },
         cancelRef: cancelRef.current,
       });
 
       setResult({
-        url: URL.createObjectURL(outputBlob),
+        url: renderResult.url,
         extension: preferredFormat,
-        size: outputBlob.size,
+        size: renderResult.size,
       });
       setProgress(100);
+      setPreviewTime(duration);
     } catch (e) {
       if (cancelRef.current.cancelled || (e instanceof Error && e.message === "CANCELLED")) {
         setError(null);
@@ -278,14 +340,70 @@ export function RenderStep() {
           </div>
         </div>
 
-        <div className="min-w-0">
-          <Label className="text-xs text-muted-foreground">Movimento da imagem</Label>
-          <div className="mt-2 flex min-h-9 items-center gap-2.5">
-            <Switch id="kb" checked={kenBurns} onCheckedChange={setKenBurns} />
-            <Label htmlFor="kb" className="cursor-pointer text-xs font-normal leading-tight">
-              Efeito Ken Burns — zoom suave
-            </Label>
+        <div className="min-w-0 sm:col-span-2">
+          <Label className="text-xs text-muted-foreground">Efeito visual — escolha apenas um</Label>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+            {MOTION_EFFECTS.map((effect) => {
+              const selected = motionEffect === effect.value;
+              const testing = testingEffect === effect.value;
+              return (
+                <div
+                  key={effect.value}
+                  className="rounded-lg border bg-secondary/20 p-2 transition-colors"
+                  style={{
+                    borderColor: selected ? "var(--primary)" : "var(--border)",
+                    boxShadow: selected ? "0 0 0 1px var(--primary)" : "none",
+                  }}
+                >
+                  <input
+                    id={`motion-effect-${effect.value}`}
+                    type="radio"
+                    name="motion-effect"
+                    value={effect.value}
+                    checked={selected}
+                    onChange={() => setMotionEffect(effect.value)}
+                    className="sr-only"
+                  />
+                  <label
+                    htmlFor={`motion-effect-${effect.value}`}
+                    className="block w-full cursor-pointer text-left focus:outline-none"
+                  >
+                    <span className="flex items-center justify-between gap-1 text-xs font-semibold text-foreground">
+                      {effect.label}
+                      {selected && <CheckCircle2 className="size-3.5 text-primary" />}
+                    </span>
+                    <span className="mt-0.5 block text-[10px] leading-tight text-muted-foreground">
+                      {effect.detail}
+                    </span>
+                    {selected && (
+                      <span className="mt-1 block text-[9px] font-bold uppercase tracking-wide text-primary">
+                        Selecionado
+                      </span>
+                    )}
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (testing) {
+                        setTestingEffect(null);
+                        setEffectTestTime(0);
+                        return;
+                      }
+                      setEffectTestTime(0);
+                      setTestingEffect(effect.value);
+                    }}
+                    disabled={!images.length || rendering}
+                    className="mt-2 text-[10px] font-semibold text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {testing ? "Parar preview" : "Testar no preview"}
+                  </button>
+                </div>
+              );
+            })}
           </div>
+          <p className="mt-1.5 text-[10px] text-muted-foreground">
+            Testar não altera a seleção. Clique no nome do efeito para escolhê-lo.
+          </p>
         </div>
       </div>
 
@@ -317,19 +435,18 @@ export function RenderStep() {
           <Button
             variant="secondary"
             className="gap-2 border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20"
-            onClick={() =>
-              fetch(result.url)
-                .then((r) => r.blob())
-                .then((b) =>
-                  downloadBlob(
-                    b,
-                    `${projectName.toLowerCase().replace(/[^a-z0-9]/g, "-")}.${result.extension}`,
-                  ),
-                )
-            }
+            asChild
           >
-            <Download className="size-4" /> Baixar Vídeo {result.extension.toUpperCase()} (
-            {(result.size / 1024 / 1024).toFixed(1)} MB)
+            <a
+              href={buildDownloadUrl(
+                result.url,
+                `${projectName.toLowerCase().replace(/[^a-z0-9]/g, "-")}.${result.extension}`,
+              )}
+              download={`${projectName.toLowerCase().replace(/[^a-z0-9]/g, "-")}.${result.extension}`}
+            >
+              <Download className="size-4" /> Baixar Vídeo {result.extension.toUpperCase()} (
+              {(result.size / 1024 / 1024).toFixed(1)} MB)
+            </a>
           </Button>
         )}
       </div>
@@ -357,7 +474,7 @@ export function RenderStep() {
             </span>
             <span className="text-foreground/80 font-mono font-medium text-xs bg-background/80 px-2 py-0.5 rounded border border-border">
               {renderStage === "encoding"
-                ? `${formatTime(Math.min(duration, (Math.max(0, progress - 10) / 89) * duration))} / ${formatTime(duration)}`
+                ? `${formatTime(Math.min(duration, previewTime))} / ${formatTime(duration)}`
                 : renderStage === "preparing"
                   ? renderDetail || "Preparação local"
                   : renderDetail || "Enviando ao servidor"}
@@ -385,9 +502,11 @@ export function RenderStep() {
       <div className="mt-5 overflow-hidden rounded-xl border border-border bg-black shadow-inner relative aspect-video flex items-center justify-center">
         <canvas
           ref={previewRef}
-          className={`w-full h-full object-contain ${result ? "hidden" : "block"}`}
+          className={`w-full h-full object-contain ${result && !testingEffect ? "hidden" : "block"}`}
         />
-        {result && <video src={result.url} controls className="w-full h-full object-contain" />}
+        {result && !testingEffect && (
+          <video src={result.url} controls className="w-full h-full object-contain" />
+        )}
       </div>
     </StepCard>
   );
