@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   Image as ImageIcon,
+  Film,
   Trash2,
   X,
   ChevronLeft,
@@ -48,8 +49,8 @@ export function ImagesStep() {
   return (
     <StepCard
       index={2}
-      title="Imagens"
-      description="Arraste para reordenar ou use as setas. A ordem na lista determina a sequência do vídeo."
+      title="Imagens e vídeos"
+      description="Use imagens, vídeos ou os dois. Arraste para definir a sequência da montagem."
       done={images.length > 0}
       aside={
         images.length > 0 ? (
@@ -59,9 +60,12 @@ export function ImagesStep() {
         ) : undefined
       }
     >
-      <FileDrop accept="image/*" multiple onFiles={addImages}>
-        <ImageIcon className="size-6 text-primary" />
-        <span>Arraste imagens ou clique para selecionar</span>
+      <FileDrop accept="image/*,video/*" multiple onFiles={addImages}>
+        <div className="flex items-center gap-1 text-primary">
+          <ImageIcon className="size-6" />
+          <Film className="size-6" />
+        </div>
+        <span>Arraste imagens ou vídeos, ou clique para selecionar</span>
       </FileDrop>
       <FileLoadIndicator state={fileLoadProgress.images} />
 
@@ -85,7 +89,19 @@ export function ImagesStep() {
                     : "border-border bg-card/60 hover:border-primary/50 hover:shadow-md"
                 }`}
               >
-                <img src={img.url} alt={img.name} className="aspect-video w-full object-cover" />
+                {img.kind === "video" ? (
+                  <video
+                    src={img.url}
+                    className="aspect-video w-full object-cover"
+                    muted
+                    preload="metadata"
+                  />
+                ) : (
+                  <img src={img.url} alt={img.name} className="aspect-video w-full object-cover" />
+                )}
+                <span className="absolute right-1.5 bottom-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-white">
+                  {img.kind === "video" ? "vídeo" : "imagem"}
+                </span>
 
                 {/* Index badge */}
                 <span className="absolute left-1.5 top-1.5 flex items-center gap-0.5 rounded bg-background/85 px-1.5 py-0.5 text-[11px] font-semibold backdrop-blur shadow-sm">
@@ -105,7 +121,7 @@ export function ImagesStep() {
                   onClick={() => removeImage(img.id)}
                   className="absolute right-1.5 top-1.5 rounded-full bg-destructive/90 p-1 text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100 shadow"
                   aria-label={`Remover ${img.name}`}
-                  title="Remover imagem"
+                  title="Remover mídia"
                 >
                   <X className="size-3" />
                 </button>

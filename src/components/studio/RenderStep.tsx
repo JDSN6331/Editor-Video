@@ -168,8 +168,12 @@ export function RenderStep() {
   const hasImages = images.length > 0;
   const hasNarration = Boolean(narration);
   const isReadyToRender = hasImages && hasNarration;
-  const readyImageCount = images.filter(
-    (image) => image.element.complete && image.element.naturalWidth > 0,
+  const readyImageCount = images.filter((media) =>
+    media.kind === "video"
+      ? media.element instanceof HTMLVideoElement && media.element.videoWidth > 0
+      : media.element instanceof HTMLImageElement &&
+        media.element.complete &&
+        media.element.naturalWidth > 0,
   ).length;
 
   const handleRender = async () => {
@@ -236,7 +240,7 @@ export function RenderStep() {
     <StepCard
       index={6}
       title="Montar o vídeo"
-      description="Geração do vídeo com sincronia de narração, música, legendas e animação de imagens."
+      description="Geração com imagens e/ou vídeos, narração, música e legendas sincronizadas."
       done={!!result}
     >
       {/* Validação de Requisitos (Fase 1.5) */}
@@ -274,7 +278,7 @@ export function RenderStep() {
               ) : (
                 <span className="size-1.5 rounded-full bg-amber-500 shrink-0" />
               )}
-              <span>Etapa 2: Pelo menos 1 imagem</span>
+              <span>Etapa 2: Pelo menos 1 imagem ou vídeo</span>
             </div>
 
             <div
@@ -299,7 +303,7 @@ export function RenderStep() {
       {isReadyToRender && (
         <div className="mb-5 grid gap-2 rounded-xl border border-primary/30 bg-primary/10 p-4 text-xs sm:grid-cols-3">
           <span>
-            <strong>{readyImageCount}</strong> de <strong>{images.length}</strong> imagens prontas
+            <strong>{readyImageCount}</strong> de <strong>{images.length}</strong> mídias prontas
           </span>
           <span>
             Narração: <strong>{formatTime(duration, true)}</strong>

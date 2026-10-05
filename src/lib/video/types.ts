@@ -10,7 +10,9 @@ export interface SourceImage {
   url: string;
   dataUrl?: string;
   blob?: Blob;
-  element: HTMLImageElement;
+  kind: "image" | "video";
+  element: HTMLImageElement | HTMLVideoElement;
+  duration?: number;
 }
 
 export interface AudioAsset {

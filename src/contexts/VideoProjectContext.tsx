@@ -369,12 +369,14 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
     [updateFileLoadProgress],
   );
 
-  /* ── Carregar imagens com DataURL para persistência ── */
+  /* ── Carregar imagens e vídeos com DataURL para persistência ── */
   const addImages = useCallback(
     async (files: File[]) => {
-      const picked = files.filter((f) => f.type.startsWith("image/"));
+      const picked = files.filter(
+        (file) => file.type.startsWith("image/") || file.type.startsWith("video/"),
+      );
       if (!picked.length) {
-        const message = "Selecione arquivos de imagem válidos.";
+        const message = "Selecione arquivos de imagem ou vídeo válidos.";
         updateFileLoadProgress("images", { status: "error", progress: 0, message });
         toast.error(message);
         return;
@@ -383,7 +385,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       updateFileLoadProgress("images", {
         status: "reading",
         progress: 0,
-        message: `Carregando ${picked.length} imagem(ns)…`,
+        message: `Carregando ${picked.length} mídia(s)…`,
       });
 
       try {
@@ -405,6 +407,25 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
               message: `Validando ${file.name}…`,
             });
             return new Promise<SourceImage>((resolve, reject) => {
+              if (file.type.startsWith("video/")) {
+                const el = document.createElement("video");
+                el.muted = true;
+                el.preload = "metadata";
+                el.onloadeddata = () =>
+                  resolve({
+                    id: `${file.name}-${generateId()}`,
+                    name: file.name,
+                    url: dataUrl,
+                    dataUrl,
+                    blob: file,
+                    kind: "video",
+                    duration: el.duration,
+                    element: el,
+                  });
+                el.onerror = () => reject(new Error(`Não foi possível ler ${file.name}`));
+                el.src = dataUrl;
+                return;
+              }
               const el = new Image();
               el.onload = () =>
                 resolve({
@@ -413,6 +434,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
                   url: dataUrl,
                   dataUrl,
                   blob: file,
+                  kind: "image",
                   element: el,
                 });
               el.onerror = () => reject(new Error(`Não foi possível ler ${file.name}`));
@@ -424,10 +446,10 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
         updateFileLoadProgress("images", {
           status: "ready",
           progress: 100,
-          message: `${loaded.length} imagem(ns) pronta(s)`,
+          message: `${loaded.length} mídia(s) pronta(s)`,
         });
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Falha ao carregar as imagens.";
+        const message = error instanceof Error ? error.message : "Falha ao carregar as mídias.";
         updateFileLoadProgress("images", { status: "error", progress: 0, message });
         toast.error(message);
       }
@@ -540,6 +562,8 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
           id: img.id,
           name: img.name,
           dataUrl: img.dataUrl || img.url,
+          kind: img.kind,
+          duration: img.duration,
         }));
 
         const narrationData = narration
@@ -653,11 +677,32 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
             id: string;
             name: string;
             dataUrl: string;
+            kind?: "image" | "video";
+            duration?: number;
           }>;
           const loadedImages = await Promise.all(
             rawImages.map(
               (img) =>
                 new Promise<SourceImage>((resolve) => {
+                  if (img.kind === "video") {
+                    const el = document.createElement("video");
+                    el.muted = true;
+                    el.preload = "metadata";
+                    el.onloadeddata = () =>
+                      resolve({
+                        ...img,
+                        url: img.dataUrl,
+                        kind: "video",
+                        ...(Number.isFinite(el.duration || img.duration)
+                          ? { duration: el.duration || img.duration! }
+                          : {}),
+                        element: el,
+                      });
+                    el.onerror = () =>
+                      resolve({ ...img, url: img.dataUrl, kind: "video", element: el });
+                    el.src = img.dataUrl;
+                    return;
+                  }
                   const el = new Image();
                   el.onload = () =>
                     resolve({
@@ -665,6 +710,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
                       name: img.name,
                       url: img.dataUrl,
                       dataUrl: img.dataUrl,
+                      kind: "image",
                       element: el,
                     });
                   el.onerror = () =>
@@ -673,6 +719,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
                       name: img.name,
                       url: img.dataUrl,
                       dataUrl: img.dataUrl,
+                      kind: "image",
                       element: el,
                     });
                   el.src = img.dataUrl;

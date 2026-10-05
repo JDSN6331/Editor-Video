@@ -62,6 +62,7 @@ const RESULT_TTL_MS = RESULT_TTL_HOURS * 60 * 60 * 1000;
 const ORPHAN_TTL_MS = 3 * 60 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const MAX_IMAGE_BYTES = 100 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 1024 * 1024 * 1024;
 
 /** Pesos de cada etapa na barra de progresso global (somam 1). */
@@ -116,7 +117,7 @@ function resultManifestPath(id: string): string {
 /** Aceita apenas nomes gerados pelo próprio upload (evita path traversal). */
 function safeStoredName(value: unknown): string | null {
   return typeof value === "string" &&
-    /^(?:image-\d{1,4}|narration|music)\.[a-z0-9]{1,6}$/.test(value)
+    /^(?:image-\d{1,4}|video-\d{1,4}|narration|music)\.[a-z0-9]{1,6}$/.test(value)
     ? value
     : null;
 }
@@ -168,10 +169,11 @@ export async function saveUploadStream(
 ): Promise<{ fileName: string; size: number }> {
   ensureSweeper();
   const safeId = safeJobId(rawId);
-  if (!["image", "narration", "music"].includes(kind)) {
+  if (!["image", "video", "narration", "music"].includes(kind)) {
     throw new Error("Tipo de arquivo inválido.");
   }
-  const limit = kind === "image" ? MAX_IMAGE_BYTES : MAX_AUDIO_BYTES;
+  const limit =
+    kind === "image" ? MAX_IMAGE_BYTES : kind === "video" ? MAX_VIDEO_BYTES : MAX_AUDIO_BYTES;
   if (declaredLength !== null && declaredLength > limit) {
     throw new Error(`Arquivo grande demais (limite de ${Math.round(limit / 1024 / 1024)} MB).`);
   }
@@ -180,7 +182,9 @@ export async function saveUploadStream(
   const extension = path.extname(originalName).toLowerCase();
   const safeExtension = /^\.[a-z0-9]{1,6}$/.test(extension) ? extension : ".bin";
   const fileName =
-    kind === "image" ? `image-${safeIndex}${safeExtension}` : `${kind}${safeExtension}`;
+    kind === "image" || kind === "video"
+      ? `${kind}-${safeIndex}${safeExtension}`
+      : `${kind}${safeExtension}`;
   const directory = uploadDirectory(safeId);
   const target = path.join(directory, fileName);
 
@@ -202,12 +206,13 @@ export async function handleFetchRenderUpload(request: Request): Promise<Respons
   const parsedIndex = Number.parseInt(url.searchParams.get("index") || "0", 10);
   const index = Number.isFinite(parsedIndex) ? Math.max(0, Math.min(9999, parsedIndex)) : 0;
   const originalName = url.searchParams.get("name") || "asset.bin";
-  if (!request.body || !["image", "narration", "music"].includes(kind || "")) {
+  if (!request.body || !["image", "video", "narration", "music"].includes(kind || "")) {
     return Response.json({ error: "Upload inválido." }, { status: 400 });
   }
 
   const declared = parseDeclaredLength(request);
-  const limit = kind === "image" ? MAX_IMAGE_BYTES : MAX_AUDIO_BYTES;
+  const limit =
+    kind === "image" ? MAX_IMAGE_BYTES : kind === "video" ? MAX_VIDEO_BYTES : MAX_AUDIO_BYTES;
   if (declared !== null && declared > limit) {
     return Response.json(
       { error: `Arquivo grande demais (limite de ${Math.round(limit / 1024 / 1024)} MB).` },
@@ -217,7 +222,10 @@ export async function handleFetchRenderUpload(request: Request): Promise<Respons
 
   const extension = path.extname(originalName).toLowerCase();
   const safeExtension = /^\.[a-z0-9]{1,6}$/.test(extension) ? extension : ".bin";
-  const fileName = kind === "image" ? `image-${index}${safeExtension}` : `${kind}${safeExtension}`;
+  const fileName =
+    kind === "image" || kind === "video"
+      ? `${kind}-${index}${safeExtension}`
+      : `${kind}${safeExtension}`;
   const directory = uploadDirectory(id);
   const target = path.join(directory, fileName);
   try {
@@ -437,14 +445,14 @@ async function disposeJob(id: string): Promise<void> {
 
 interface RenderPlan {
   metadata: RenderMetadata;
-  imagePaths: string[];
+  media: Array<{ kind: "image" | "video"; path: string }>;
   narrationPath: string;
   musicPath: string | null;
 }
 
 async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   const { id, workDir } = job;
-  const { metadata, imagePaths, narrationPath, musicPath } = plan;
+  const { metadata, media, narrationPath, musicPath } = plan;
   const hasCaptions = Boolean(metadata.captions?.length);
   const captionBackgroundPath = path.join(workDir, "captions-background.ass");
   const captionTextPath = path.join(workDir, "captions-text.ass");
@@ -458,7 +466,7 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   const outputPath = path.join(workDir, metadata.format === "webm" ? "output.webm" : "output.mp4");
 
   const finalWeight = 1 - SEGMENTS_WEIGHT - CONCAT_WEIGHT;
-  const perImage = metadata.duration / imagePaths.length;
+  const perImage = metadata.duration / media.length;
   // A superfície 2x reduz o arredondamento do zoompan que fazia o centro
   // oscilar entre pixels e dava a impressão de imagem tremendo.
   const scaledWidth = metadata.width * 3;
@@ -466,10 +474,11 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   const frames = Math.max(1, Math.ceil(perImage * metadata.fps));
   const segmentPaths: string[] = [];
   console.log(
-    `[render-service] job=${id} iniciando ${imagePaths.length} segmentos em ${metadata.width}x${metadata.height}@${metadata.fps}`,
+    `[render-service] job=${id} iniciando ${media.length} segmentos em ${metadata.width}x${metadata.height}@${metadata.fps}`,
   );
 
-  for (let index = 0; index < imagePaths.length; index += 1) {
+  for (let index = 0; index < media.length; index += 1) {
+    const source = media[index]!;
     const segmentPath = path.join(workDir, `segment-${String(index).padStart(3, "0")}.mp4`);
     const base = `scale=${scaledWidth}:${scaledHeight}:force_original_aspect_ratio=increase,crop=${scaledWidth}:${scaledHeight}`;
     const frameDivisor = Math.max(1, frames - 1);
@@ -490,17 +499,16 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
             : metadata.motionEffect === "pan"
               ? zoompan("1.06", `(iw-iw/zoom)*${smooth}`, "(ih-ih/zoom)/2")
               : `,scale=${metadata.width}:${metadata.height}`;
-    const detail = `Cena ${index + 1} de ${imagePaths.length}`;
-    const commonInput = [
-      "-y",
-      "-loop",
-      "1",
-      "-framerate",
-      String(metadata.fps),
-      "-i",
-      imagePaths[index]!,
-    ];
-    const canDissolve = metadata.motionEffect === "dissolve" && index < imagePaths.length - 1;
+    const detail = `Cena ${index + 1} de ${media.length}`;
+    const commonInput =
+      source.kind === "video"
+        ? ["-y", "-stream_loop", "-1", "-i", source.path]
+        : ["-y", "-loop", "1", "-framerate", String(metadata.fps), "-i", source.path];
+    const canDissolve =
+      source.kind === "image" &&
+      media[index + 1]?.kind === "image" &&
+      metadata.motionEffect === "dissolve" &&
+      index < media.length - 1;
     const dissolveDuration = Math.max(0.1, Math.min(metadata.fade, perImage / 3));
     const segmentArgs = canDissolve
       ? [
@@ -510,13 +518,19 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
           "-framerate",
           String(metadata.fps),
           "-i",
-          imagePaths[index + 1]!,
+          media[index + 1]!.path,
           "-filter_complex",
           `[0:v]${base},scale=${metadata.width}:${metadata.height},setsar=1,format=yuv420p[cur];[1:v]${base},scale=${metadata.width}:${metadata.height},setsar=1,format=yuv420p[next];[cur][next]xfade=transition=fade:duration=${dissolveDuration}:offset=${Math.max(0, perImage - dissolveDuration)}[out]`,
           "-map",
           "[out]",
         ]
-      : [...commonInput, "-vf", `${base}${motion},setsar=1,format=yuv420p`];
+      : [
+          ...commonInput,
+          "-vf",
+          source.kind === "video"
+            ? `${base},scale=${metadata.width}:${metadata.height},fps=${metadata.fps},setsar=1,format=yuv420p`
+            : `${base}${motion},setsar=1,format=yuv420p`,
+        ];
     segmentArgs.push(
       "-frames:v",
       String(frames),
@@ -533,18 +547,18 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
       "0",
       segmentPath,
     );
-    setProgress(id, (index / imagePaths.length) * SEGMENTS_WEIGHT, metadata.duration, {
+    setProgress(id, (index / media.length) * SEGMENTS_WEIGHT, metadata.duration, {
       stage: "segments",
       detail,
     });
     await runFfmpeg(segmentArgs, job, (seconds) => {
       const within = Math.min(1, seconds / perImage);
-      setProgress(id, ((index + within) / imagePaths.length) * SEGMENTS_WEIGHT, metadata.duration, {
+      setProgress(id, ((index + within) / media.length) * SEGMENTS_WEIGHT, metadata.duration, {
         detail,
       });
     });
     segmentPaths.push(segmentPath);
-    console.log(`[render-service] job=${id} segmento ${index + 1}/${imagePaths.length} concluído`);
+    console.log(`[render-service] job=${id} segmento ${index + 1}/${media.length} concluído`);
   }
 
   setProgress(id, SEGMENTS_WEIGHT, metadata.duration, {
@@ -650,7 +664,7 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
     [
       visualsPath,
       concatListPath,
-      ...imagePaths,
+      ...media.map((item) => item.path),
       narrationPath,
       ...(musicPath ? [musicPath] : []),
     ].map((file) => fs.unlink(file).catch(() => {})),
@@ -699,6 +713,7 @@ export async function startRenderJob(
   body: {
     metadata?: unknown;
     images?: unknown;
+    media?: unknown;
     narration?: unknown;
     music?: unknown;
   } | null,
@@ -721,18 +736,26 @@ export async function startRenderJob(
     throw new Error("Os arquivos enviados não foram encontrados no servidor. Tente novamente.");
   }
 
-  const imageNames = Array.isArray(body.images) ? body.images : [];
-  if (!imageNames.length) throw new Error("Nenhuma imagem foi recebida pelo servidor.");
-  if (imageNames.length > 200) throw new Error("O limite é de 200 imagens por vídeo.");
-  const imagePaths: string[] = [];
-  for (const name of imageNames) {
-    const stored = safeStoredName(name);
-    if (!stored) throw new Error("Nome de imagem inválido no pedido de montagem.");
+  const rawMedia = Array.isArray(body.media)
+    ? body.media
+    : Array.isArray(body.images)
+      ? body.images.map((fileName) => ({ kind: "image", fileName }))
+      : [];
+  if (!rawMedia.length) throw new Error("Nenhuma imagem ou vídeo foi recebido pelo servidor.");
+  if (rawMedia.length > 200) throw new Error("O limite é de 200 mídias por vídeo.");
+  const media: Array<{ kind: "image" | "video"; path: string }> = [];
+  for (const item of rawMedia) {
+    const record = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+    const kind = record["kind"] === "video" ? "video" : "image";
+    const stored = safeStoredName(record["fileName"]);
+    if (!stored || !stored.startsWith(`${kind}-`)) {
+      throw new Error("Nome de mídia inválido no pedido de montagem.");
+    }
     const filePath = path.join(workDir, stored);
     await fs.access(filePath).catch(() => {
-      throw new Error(`A imagem ${stored} não chegou ao servidor.`);
+      throw new Error(`A mídia ${stored} não chegou ao servidor.`);
     });
-    imagePaths.push(filePath);
+    media.push({ kind, path: filePath });
   }
 
   const storedNarration = safeStoredName(body.narration);
@@ -771,7 +794,7 @@ export async function startRenderJob(
     stage: "segments",
     detail: "Iniciando montagem",
   });
-  void startJobInBackground(job, { metadata, imagePaths, narrationPath, musicPath });
+  void startJobInBackground(job, { metadata, media, narrationPath, musicPath });
   return { id };
 }
 
@@ -782,6 +805,7 @@ export async function handleFetchRender(request: Request): Promise<Response> {
     const body = (await request.json().catch(() => null)) as {
       metadata?: unknown;
       images?: unknown;
+      media?: unknown;
       narration?: unknown;
       music?: unknown;
     } | null;

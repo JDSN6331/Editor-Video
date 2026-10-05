@@ -3,17 +3,19 @@ import type { Caption, MotionEffect } from "./types";
 /** Desenha a imagem cobrindo todo o quadro (crop central) com zoom opcional. */
 export function drawCover(
   ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
+  img: HTMLImageElement | HTMLVideoElement,
   w: number,
   h: number,
   zoom = 1,
   alpha = 1,
   horizontalPosition = 0.5,
 ): boolean {
-  const imageWidth = img.naturalWidth || img.width;
-  const imageHeight = img.naturalHeight || img.height;
+  const isVideo = img instanceof HTMLVideoElement;
+  const imageWidth = isVideo ? img.videoWidth : img.naturalWidth || img.width;
+  const imageHeight = isVideo ? img.videoHeight : img.naturalHeight || img.height;
   if (
-    !img.complete ||
+    (!isVideo && !img.complete) ||
+    (isVideo && img.readyState < HTMLMediaElement.HAVE_METADATA) ||
     imageWidth <= 0 ||
     imageHeight <= 0 ||
     !Number.isFinite(w) ||
@@ -143,7 +145,7 @@ export function captionAt(captions: Caption[], t: number): Caption | null {
 
 export function drawFrame(
   ctx: CanvasRenderingContext2D,
-  images: HTMLImageElement[],
+  images: Array<HTMLImageElement | HTMLVideoElement>,
   t: number,
   duration: number,
   w: number,
@@ -179,6 +181,10 @@ export function drawFrame(
   const horizontalPosition =
     effect === "ken-burns" ? 0.2 + 0.6 * easedProgress : effect === "pan" ? easedProgress : 0.5;
   const current = images[index];
+  if (current instanceof HTMLVideoElement && Number.isFinite(current.duration)) {
+    const target = Math.min(Math.max(0, current.duration - 0.05), local % current.duration);
+    if (Math.abs(current.currentTime - target) > 0.12) current.currentTime = target;
+  }
   if (current) drawCover(ctx, current, w, h, zoom, 1, horizontalPosition);
 
   const fade = effect === "dissolve" ? options.fade : 0;

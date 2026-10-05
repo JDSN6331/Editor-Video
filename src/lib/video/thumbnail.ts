@@ -1,7 +1,7 @@
 import { drawCover, roundRect } from "./draw";
 
 export interface ThumbnailOptions {
-  image: HTMLImageElement;
+  image: HTMLImageElement | HTMLVideoElement;
   title: string;
   subtitle?: string;
   accent: string;

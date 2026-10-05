@@ -11,7 +11,13 @@ import { generateId } from "../uuid";
  */
 
 interface ServerRenderOptions {
-  images: Array<{ name: string; dataUrl?: string; url: string; blob?: Blob }>;
+  images: Array<{
+    name: string;
+    dataUrl?: string;
+    url: string;
+    blob?: Blob;
+    kind: "image" | "video";
+  }>;
   narration: { name: string; dataUrl?: string; url: string; blob?: Blob };
   music?: { name: string; dataUrl?: string; url: string; blob?: Blob } | null;
   captions: Caption[] | null;
@@ -51,7 +57,7 @@ interface RenderProgress {
 }
 
 type SourceDescriptor = {
-  kind: "image" | "narration" | "music";
+  kind: "image" | "video" | "narration" | "music";
   index: number;
   name: string;
   source: string;
@@ -281,18 +287,18 @@ export async function renderVideoOnServer(
     // 1. Envio das mídias, uma por vez.
     const sources: SourceDescriptor[] = [
       ...options.images.map((image, index): SourceDescriptor => ({
-        kind: "image",
+        kind: image.kind,
         index,
         name: image.name,
         source: image.dataUrl || image.url,
-        blob: image.blob,
+        ...(image.blob ? { blob: image.blob } : {}),
       })),
       {
         kind: "narration",
         index: 0,
         name: options.narration.name,
         source: options.narration.dataUrl || options.narration.url,
-        blob: options.narration.blob,
+        ...(options.narration.blob ? { blob: options.narration.blob } : {}),
       },
     ];
     if (options.music) {
@@ -301,15 +307,19 @@ export async function renderVideoOnServer(
         index: 0,
         name: options.music.name,
         source: options.music.dataUrl || options.music.url,
-        blob: options.music.blob,
+        ...(options.music.blob ? { blob: options.music.blob } : {}),
       });
     }
 
     const weights = sources.map((item) => estimateBytes(item.source));
     const totalWeight = weights.reduce((sum, value) => sum + value, 0);
     let completedWeight = 0;
-    const uploaded: { images: string[]; narration: string; music: string | null } = {
-      images: [],
+    const uploaded: {
+      media: Array<{ kind: "image" | "video"; fileName: string }>;
+      narration: string;
+      music: string | null;
+    } = {
+      media: [],
       narration: "",
       music: null,
     };
@@ -334,8 +344,9 @@ export async function renderVideoOnServer(
         cancelRef,
       );
       completedWeight += weight;
-      if (asset.kind === "image") uploaded.images.push(fileName);
-      else if (asset.kind === "narration") uploaded.narration = fileName;
+      if (asset.kind === "image" || asset.kind === "video") {
+        uploaded.media.push({ kind: asset.kind, fileName });
+      } else if (asset.kind === "narration") uploaded.narration = fileName;
       else uploaded.music = fileName;
     }
     onProgress?.(UPLOAD_SHARE, "uploading", "Todos os arquivos enviados");
@@ -359,7 +370,7 @@ export async function renderVideoOnServer(
           format: options.format,
           captions: options.captions,
         },
-        images: uploaded.images,
+        media: uploaded.media,
         narration: uploaded.narration,
         music: uploaded.music,
       }),
