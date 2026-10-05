@@ -244,13 +244,13 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   const [motionEffect, setMotionEffectState] = useState<MotionEffect>(() => {
     const stored =
       typeof localStorage !== "undefined" ? localStorage.getItem("motion_effect") : null;
-    return ["ken-burns", "zoom", "pan", "dissolve", "zoom-out"].includes(stored || "")
+    return ["none", "ken-burns", "zoom", "pan", "dissolve", "zoom-out"].includes(stored || "")
       ? (stored as MotionEffect)
       : "ken-burns";
   });
   const setMotionEffect = useCallback((value: MotionEffect) => {
     setMotionEffectState(value);
-    setKenBurns(value !== "dissolve");
+    setKenBurns(value !== "dissolve" && value !== "none");
     if (typeof localStorage !== "undefined") localStorage.setItem("motion_effect", value);
   }, []);
   const [preferredFormat, setPreferredFormat] = useState<"mp4" | "webm">("mp4");

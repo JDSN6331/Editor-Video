@@ -20,6 +20,7 @@ import { VIDEO_PRESETS, type MotionEffect, type PresetKey } from "@/lib/video/ty
 import { GoogleDriveUpload } from "./GoogleDriveUpload";
 
 const MOTION_EFFECTS: Array<{ value: MotionEffect; label: string; detail: string }> = [
+  { value: "none", label: "Sem efeito", detail: "Imagem estática, sem movimento ou transição" },
   { value: "ken-burns", label: "Ken Burns", detail: "Zoom com deslocamento diagonal" },
   { value: "zoom", label: "Zoom suave", detail: "Aproximação central discreta" },
   { value: "pan", label: "Panorâmica", detail: "Movimento horizontal lento" },
@@ -375,7 +376,7 @@ export function RenderStep() {
 
         <div className="min-w-0 sm:col-span-2">
           <Label className="text-xs text-muted-foreground">Efeito visual — escolha apenas um</Label>
-          <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+          <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-6">
             {MOTION_EFFECTS.map((effect) => {
               const selected = motionEffect === effect.value;
               const testing = testingEffect === effect.value;

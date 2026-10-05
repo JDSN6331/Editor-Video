@@ -29,4 +29,4 @@ export const VIDEO_PRESETS = {
 
 export type PresetKey = keyof typeof VIDEO_PRESETS;
 
-export type MotionEffect = "ken-burns" | "zoom" | "pan" | "dissolve" | "zoom-out";
+export type MotionEffect = "none" | "ken-burns" | "zoom" | "pan" | "dissolve" | "zoom-out";

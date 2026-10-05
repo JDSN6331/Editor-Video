@@ -27,7 +27,7 @@ interface CaptionInput {
   text: string;
 }
 
-type MotionEffect = "ken-burns" | "zoom" | "pan" | "dissolve" | "zoom-out";
+type MotionEffect = "none" | "ken-burns" | "zoom" | "pan" | "dissolve" | "zoom-out";
 
 interface RenderMetadata {
   width: number;
@@ -278,9 +278,14 @@ function validateMetadata(raw: unknown): RenderMetadata {
     })
     .filter((caption) => caption.text && caption.end > caption.start);
   const requestedEffect = String(input["motionEffect"] || "");
-  const motionEffect: MotionEffect = ["ken-burns", "zoom", "pan", "dissolve", "zoom-out"].includes(
-    requestedEffect,
-  )
+  const motionEffect: MotionEffect = [
+    "none",
+    "ken-burns",
+    "zoom",
+    "pan",
+    "dissolve",
+    "zoom-out",
+  ].includes(requestedEffect)
     ? (requestedEffect as MotionEffect)
     : input["kenBurns"] === false
       ? "dissolve"
