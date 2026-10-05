@@ -197,7 +197,11 @@ export function ThumbnailStep() {
                     borderColor: thumbIndex === i ? accent : "transparent",
                   }}
                 >
-                  <img src={img.url} alt="" className="h-8 w-14 object-cover" />
+                  <img
+                    src={img.kind === "video" ? img.posterUrl : img.url}
+                    alt=""
+                    className="h-8 w-14 object-cover"
+                  />
                 </button>
               ))}
             </div>

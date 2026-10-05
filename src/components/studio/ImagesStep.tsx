@@ -90,11 +90,10 @@ export function ImagesStep() {
                 }`}
               >
                 {img.kind === "video" ? (
-                  <video
-                    src={img.url}
+                  <img
+                    src={img.posterUrl}
+                    alt={`Quadro de ${img.name}`}
                     className="aspect-video w-full object-cover"
-                    muted
-                    preload="metadata"
                   />
                 ) : (
                   <img src={img.url} alt={img.name} className="aspect-video w-full object-cover" />

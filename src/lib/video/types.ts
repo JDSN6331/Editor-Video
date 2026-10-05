@@ -13,6 +13,7 @@ export interface SourceImage {
   kind: "image" | "video";
   element: HTMLImageElement | HTMLVideoElement;
   duration?: number;
+  posterUrl?: string;
 }
 
 export interface AudioAsset {

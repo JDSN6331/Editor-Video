@@ -14,9 +14,11 @@ RUN npm ci
 COPY backend ./backend
 COPY src/server ./src/server
 RUN grep -q '"/api/render/drive-progress"' src/server/node-handler.ts \
+  && grep -q '\["image", "video", "narration", "music"\]' src/server/render-service.ts \
   && echo "Building backend revision ${GIT_SHA}" \
   && npm run build:backend \
   && grep -q '/api/render/drive-progress' dist/render-backend.mjs \
+  && grep -q 'video-' dist/render-backend.mjs \
   && printf '%s\n' "${GIT_SHA}" > /app/BUILD_SHA
 
 FROM node:20-bookworm-slim AS runner

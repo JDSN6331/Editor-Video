@@ -191,6 +191,61 @@ function dataUrlToBlob(dataUrl: string): Blob {
   return new Blob([u8arr], { type: mime });
 }
 
+function loadVideoPreview(source: string): Promise<{
+  element: HTMLVideoElement;
+  duration?: number;
+  posterUrl?: string;
+}> {
+  return new Promise((resolve, reject) => {
+    const element = document.createElement("video");
+    element.muted = true;
+    element.playsInline = true;
+    element.preload = "auto";
+    let settled = false;
+    const timeout = window.setTimeout(() => {
+      settled = true;
+      reject(new Error("O vídeo demorou demais para preparar o preview."));
+    }, 15_000);
+
+    const finish = () => {
+      if (settled || !element.videoWidth || !element.videoHeight) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      const canvas = document.createElement("canvas");
+      canvas.width = element.videoWidth;
+      canvas.height = element.videoHeight;
+      const context = canvas.getContext("2d");
+      let posterUrl: string | undefined;
+      if (context) {
+        context.drawImage(element, 0, 0, canvas.width, canvas.height);
+        posterUrl = canvas.toDataURL("image/jpeg", 0.82);
+      }
+      resolve({
+        element,
+        ...(Number.isFinite(element.duration) ? { duration: element.duration } : {}),
+        ...(posterUrl ? { posterUrl } : {}),
+      });
+    };
+
+    element.onloadeddata = () => {
+      const duration = Number.isFinite(element.duration) ? element.duration : 0;
+      const sampleTime = duration > 0.2 ? Math.min(1, duration * 0.1) : 0;
+      if (sampleTime > 0 && Math.abs(element.currentTime - sampleTime) > 0.01) {
+        element.currentTime = sampleTime;
+      } else {
+        finish();
+      }
+    };
+    element.onseeked = finish;
+    element.onerror = () => {
+      window.clearTimeout(timeout);
+      reject(new Error("Não foi possível decodificar o vídeo."));
+    };
+    element.src = source;
+    element.load();
+  });
+}
+
 export function VideoProjectProvider({ children }: { children: ReactNode }) {
   // Project & DB State
   const [projectId, setProjectId] = useState<string>(() => {
@@ -408,22 +463,21 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
             });
             return new Promise<SourceImage>((resolve, reject) => {
               if (file.type.startsWith("video/")) {
-                const el = document.createElement("video");
-                el.muted = true;
-                el.preload = "metadata";
-                el.onloadeddata = () =>
-                  resolve({
-                    id: `${file.name}-${generateId()}`,
-                    name: file.name,
-                    url: dataUrl,
-                    dataUrl,
-                    blob: file,
-                    kind: "video",
-                    duration: el.duration,
-                    element: el,
-                  });
-                el.onerror = () => reject(new Error(`Não foi possível ler ${file.name}`));
-                el.src = dataUrl;
+                void loadVideoPreview(dataUrl)
+                  .then(({ element, duration, posterUrl }) =>
+                    resolve({
+                      id: `${file.name}-${generateId()}`,
+                      name: file.name,
+                      url: dataUrl,
+                      dataUrl,
+                      blob: file,
+                      kind: "video",
+                      ...(duration ? { duration } : {}),
+                      ...(posterUrl ? { posterUrl } : {}),
+                      element,
+                    }),
+                  )
+                  .catch(() => reject(new Error(`Não foi possível ler ${file.name}`)));
                 return;
               }
               const el = new Image();
@@ -564,6 +618,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
           dataUrl: img.dataUrl || img.url,
           kind: img.kind,
           duration: img.duration,
+          posterUrl: img.posterUrl,
         }));
 
         const narrationData = narration
@@ -679,28 +734,34 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
             dataUrl: string;
             kind?: "image" | "video";
             duration?: number;
+            posterUrl?: string;
           }>;
           const loadedImages = await Promise.all(
             rawImages.map(
               (img) =>
                 new Promise<SourceImage>((resolve) => {
                   if (img.kind === "video") {
-                    const el = document.createElement("video");
-                    el.muted = true;
-                    el.preload = "metadata";
-                    el.onloadeddata = () =>
-                      resolve({
-                        ...img,
-                        url: img.dataUrl,
-                        kind: "video",
-                        ...(Number.isFinite(el.duration || img.duration)
-                          ? { duration: el.duration || img.duration! }
-                          : {}),
-                        element: el,
+                    void loadVideoPreview(img.dataUrl)
+                      .then(({ element, duration, posterUrl }) =>
+                        resolve({
+                          ...img,
+                          url: img.dataUrl,
+                          kind: "video",
+                          ...(Number.isFinite(duration || img.duration)
+                            ? { duration: duration || img.duration! }
+                            : {}),
+                          ...(posterUrl || img.posterUrl
+                            ? { posterUrl: posterUrl || img.posterUrl }
+                            : {}),
+                          element,
+                        }),
+                      )
+                      .catch(() => {
+                        const element = document.createElement("video");
+                        element.muted = true;
+                        element.src = img.dataUrl;
+                        resolve({ ...img, url: img.dataUrl, kind: "video", element });
                       });
-                    el.onerror = () =>
-                      resolve({ ...img, url: img.dataUrl, kind: "video", element: el });
-                    el.src = img.dataUrl;
                     return;
                   }
                   const el = new Image();
