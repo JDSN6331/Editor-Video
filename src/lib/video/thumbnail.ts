@@ -9,6 +9,62 @@ export interface ThumbnailOptions {
   height?: number;
 }
 
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
+  const lines: string[] = [];
+  let current = "";
+
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const test = current ? `${current} ${word}` : word;
+    if (ctx.measureText(test).width <= maxWidth) {
+      current = test;
+      continue;
+    }
+
+    if (current) {
+      lines.push(current);
+      current = "";
+    }
+
+    let fragment = "";
+    for (const character of word) {
+      const candidate = `${fragment}${character}`;
+      if (ctx.measureText(candidate).width > maxWidth && fragment) {
+        lines.push(fragment);
+        fragment = character;
+      } else {
+        fragment = candidate;
+      }
+    }
+    current = fragment;
+  }
+
+  if (current) lines.push(current);
+  return lines;
+}
+
+function fitText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  weight: number,
+  initialSize: number,
+  minSize: number,
+  maxWidth: number,
+  maxLines: number,
+) {
+  let fontSize = initialSize;
+  let lines: string[] = [];
+
+  do {
+    ctx.font = `${weight} ${fontSize}px Inter, "Segoe UI", system-ui, sans-serif`;
+    lines = wrapText(ctx, text, maxWidth);
+    if (lines.length <= maxLines) break;
+    if (fontSize === minSize) break;
+    fontSize = Math.max(minSize, fontSize - 2);
+  } while (fontSize >= minSize);
+
+  return { fontSize, lines };
+}
+
 /** Gera a thumbnail 1280x720 com legenda em destaque. */
 export function drawThumbnail(canvas: HTMLCanvasElement, opts: ThumbnailOptions) {
   const w = opts.width ?? 1280;
@@ -29,27 +85,22 @@ export function drawThumbnail(canvas: HTMLCanvasElement, opts: ThumbnailOptions)
   ctx.fillRect(0, 0, w, h);
 
   const title = opts.title.trim().toUpperCase();
-  const fontSize = title.length > 40 ? 64 : title.length > 22 ? 82 : 104;
-  ctx.font = `800 ${fontSize}px Inter, "Segoe UI", system-ui, sans-serif`;
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
 
   const maxWidth = w * 0.86;
-  const words = title.split(" ");
-  const lines: string[] = [];
-  let current = "";
-  for (const word of words) {
-    const test = current ? `${current} ${word}` : word;
-    if (ctx.measureText(test).width > maxWidth && current) {
-      lines.push(current);
-      current = word;
-    } else current = test;
-  }
-  if (current) lines.push(current);
-
+  const initialTitleSize = title.length > 40 ? 64 : title.length > 22 ? 82 : 104;
+  const titleLayout = fitText(ctx, title, 800, initialTitleSize, 44, maxWidth, 3);
+  const { fontSize, lines } = titleLayout;
   const lineHeight = fontSize * 1.1;
-  const subtitle = opts.subtitle?.trim();
-  const bottom = subtitle ? h - 110 : h - 64;
+  const subtitle = opts.subtitle?.trim().toUpperCase();
+  const subtitleLayout = subtitle ? fitText(ctx, subtitle, 600, 38, 26, maxWidth, 2) : null;
+  const subtitleLineHeight = subtitleLayout ? subtitleLayout.fontSize * 1.15 : 0;
+  const subtitleBottom = h - 48;
+  const subtitleTop = subtitleLayout
+    ? subtitleBottom - (subtitleLayout.lines.length - 1) * subtitleLineHeight
+    : subtitleBottom;
+  const bottom = subtitleLayout ? subtitleTop - 42 : h - 64;
   const startY = bottom - (lines.length - 1) * lineHeight;
 
   // barra de destaque
@@ -57,6 +108,7 @@ export function drawThumbnail(canvas: HTMLCanvasElement, opts: ThumbnailOptions)
   roundRect(ctx, 56, startY - fontSize, 12, lines.length * lineHeight, 6);
   ctx.fill();
 
+  ctx.font = `800 ${fontSize}px Inter, "Segoe UI", system-ui, sans-serif`;
   lines.forEach((line, i) => {
     const y = startY + i * lineHeight;
     ctx.lineWidth = fontSize * 0.16;
@@ -66,9 +118,12 @@ export function drawThumbnail(canvas: HTMLCanvasElement, opts: ThumbnailOptions)
     ctx.fillText(line, 90, y);
   });
 
-  if (subtitle) {
-    ctx.font = `600 38px Inter, "Segoe UI", system-ui, sans-serif`;
+  if (subtitleLayout) {
+    ctx.font = `600 ${subtitleLayout.fontSize}px Inter, "Segoe UI", system-ui, sans-serif`;
     ctx.fillStyle = opts.accent;
-    ctx.fillText(subtitle.toUpperCase(), 90, h - 48);
+    subtitleLayout.lines.forEach((line, index) => {
+      const y = subtitleTop + index * subtitleLineHeight;
+      ctx.fillText(line, 90, y);
+    });
   }
 }
