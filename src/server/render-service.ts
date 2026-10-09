@@ -472,10 +472,10 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
 
   const finalWeight = 1 - SEGMENTS_WEIGHT - CONCAT_WEIGHT;
   const perImage = metadata.duration / media.length;
-  // A superfície 2x reduz o arredondamento do zoompan que fazia o centro
+  // A superfície 4x reduz o arredondamento do zoompan que fazia o centro
   // oscilar entre pixels e dava a impressão de imagem tremendo.
-  const scaledWidth = metadata.width * 3;
-  const scaledHeight = metadata.height * 3;
+  const scaledWidth = metadata.width * 4;
+  const scaledHeight = metadata.height * 4;
   const frames = Math.max(1, Math.ceil(perImage * metadata.fps));
   const segmentPaths: string[] = [];
   console.log(
@@ -485,7 +485,10 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   for (let index = 0; index < media.length; index += 1) {
     const source = media[index]!;
     const segmentPath = path.join(workDir, `segment-${String(index).padStart(3, "0")}.mp4`);
-    const base = `scale=${scaledWidth}:${scaledHeight}:force_original_aspect_ratio=increase,crop=${scaledWidth}:${scaledHeight}`;
+    const animatedBase = `scale=${scaledWidth}:${scaledHeight}:force_original_aspect_ratio=increase,crop=${scaledWidth}:${scaledHeight}`;
+    // O caminho estatico evita zoompan e reamostragem redundante: cada quadro
+    // recebe exatamente a mesma geometria.
+    const staticBase = `scale=${metadata.width}:${metadata.height}:force_original_aspect_ratio=increase,crop=${metadata.width}:${metadata.height}`;
     const frameDivisor = Math.max(1, frames - 1);
     const smooth = `(3*(on/${frameDivisor})*(on/${frameDivisor})-2*(on/${frameDivisor})*(on/${frameDivisor})*(on/${frameDivisor}))`;
     const zoompan = (z: string, x: string, y: string) =>
@@ -503,7 +506,7 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
             ? zoompan(`1.12-0.12*${smooth}`, "(iw-iw/zoom)/2", "(ih-ih/zoom)/2")
             : metadata.motionEffect === "pan"
               ? zoompan("1.25", `(iw-iw/zoom)*(on/${frameDivisor})`, "(ih-ih/zoom)/2")
-              : `,scale=${metadata.width}:${metadata.height}`;
+              : "";
     const detail = `Cena ${index + 1} de ${media.length}`;
     const commonInput =
       source.kind === "video"
@@ -525,7 +528,7 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
           "-i",
           media[index + 1]!.path,
           "-filter_complex",
-          `[0:v]${base},scale=${metadata.width}:${metadata.height},setsar=1,format=yuv420p[cur];[1:v]${base},scale=${metadata.width}:${metadata.height},setsar=1,format=yuv420p[next];[cur][next]xfade=transition=fade:duration=${dissolveDuration}:offset=${Math.max(0, perImage - dissolveDuration)}[out]`,
+          `[0:v]${staticBase},setsar=1,format=yuv420p[cur];[1:v]${staticBase},setsar=1,format=yuv420p[next];[cur][next]xfade=transition=fade:duration=${dissolveDuration}:offset=${Math.max(0, perImage - dissolveDuration)}[out]`,
           "-map",
           "[out]",
         ]
@@ -533,8 +536,10 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
           ...commonInput,
           "-vf",
           source.kind === "video"
-            ? `${base},scale=${metadata.width}:${metadata.height},fps=${metadata.fps},setsar=1,format=yuv420p`
-            : `${base}${motion},setsar=1,format=yuv420p`,
+            ? `${staticBase},fps=${metadata.fps},setsar=1,format=yuv420p`
+            : metadata.motionEffect === "none"
+              ? `${staticBase},setsar=1,format=yuv420p`
+              : `${animatedBase}${motion},setsar=1,format=yuv420p`,
         ];
     segmentArgs.push(
       "-frames:v",

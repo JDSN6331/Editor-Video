@@ -1,5 +1,5 @@
 import { drawFrame } from "./draw";
-import type { Caption } from "./types";
+import type { Caption, MotionEffect } from "./types";
 import { transcodeWebMToMp4 } from "./transcode";
 
 declare global {
@@ -19,6 +19,7 @@ export interface RenderOptions {
   height: number;
   fps: number;
   kenBurns: boolean;
+  motionEffect?: MotionEffect;
   fade: number;
   format?: "mp4" | "webm";
   previewCanvas?: HTMLCanvasElement | null;
@@ -98,6 +99,7 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
     height,
     fps,
     kenBurns,
+    motionEffect,
     fade,
     previewCanvas,
     onProgress,
@@ -121,7 +123,11 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
   if (previewCanvas && previewCtx) {
     previewCanvas.width = Math.round(width / 2);
     previewCanvas.height = Math.round(height / 2);
-    drawFrame(ctx, images, 0, duration, width, height, captions, { kenBurns, fade });
+    drawFrame(ctx, images, 0, duration, width, height, captions, {
+      kenBurns,
+      fade,
+      motionEffect,
+    });
     previewCtx.drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
   }
 
@@ -153,7 +159,11 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
 
   // O primeiro quadro deve existir antes da captura; isso evita gravações congeladas
   // no quadro inicial em implementações mais estritas de captureStream.
-  drawFrame(ctx, images, 0, duration, width, height, captions, { kenBurns, fade });
+  drawFrame(ctx, images, 0, duration, width, height, captions, {
+    kenBurns,
+    fade,
+    motionEffect,
+  });
   // Deixe o navegador amostrar o canvas em cadencia constante. O modo manual
   // (captureStream(0) + requestFrame em setInterval) produzia timestamps
   // irregulares e o FFmpeg precisava duplicar quadros, causando stutter.
@@ -240,12 +250,17 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
           drawFrame(ctx, images, Math.max(0, duration - 0.01), duration, width, height, captions, {
             kenBurns,
             fade,
+            motionEffect,
           });
           resolve();
           return;
         }
         const clamped = Math.max(0, t);
-        drawFrame(ctx, images, clamped, duration, width, height, captions, { kenBurns, fade });
+        drawFrame(ctx, images, clamped, duration, width, height, captions, {
+          kenBurns,
+          fade,
+          motionEffect,
+        });
         if (
           previewCtx &&
           previewCanvas &&

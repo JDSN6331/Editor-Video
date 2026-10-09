@@ -9,6 +9,7 @@ export function drawCover(
   zoom = 1,
   alpha = 1,
   horizontalPosition = 0.5,
+  verticalPosition = 0.5,
 ): boolean {
   const isVideo = img instanceof HTMLVideoElement;
   const imageWidth = isVideo ? img.videoWidth : img.naturalWidth || img.width;
@@ -35,7 +36,8 @@ export function drawCover(
   try {
     ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
     const safePosition = Math.max(0, Math.min(1, horizontalPosition));
-    ctx.drawImage(img, (w - dw) * safePosition, (h - dh) / 2, dw, dh);
+    const safeVerticalPosition = Math.max(0, Math.min(1, verticalPosition));
+    ctx.drawImage(img, (w - dw) * safePosition, (h - dh) * safeVerticalPosition, dw, dh);
     return true;
   } catch (error) {
     console.warn("Nao foi possivel desenhar uma imagem no preview.", error);
@@ -180,12 +182,13 @@ export function drawFrame(
             : 1;
   const horizontalPosition =
     effect === "ken-burns" ? 0.2 + 0.6 * easedProgress : effect === "pan" ? progress : 0.5;
+  const verticalPosition = effect === "ken-burns" ? 0.3 + 0.4 * easedProgress : 0.5;
   const current = images[index];
   if (current instanceof HTMLVideoElement && Number.isFinite(current.duration)) {
     const target = Math.min(Math.max(0, current.duration - 0.05), local % current.duration);
     if (Math.abs(current.currentTime - target) > 0.12) current.currentTime = target;
   }
-  if (current) drawCover(ctx, current, w, h, zoom, 1, horizontalPosition);
+  if (current) drawCover(ctx, current, w, h, zoom, 1, horizontalPosition, verticalPosition);
 
   const fade = effect === "dissolve" ? options.fade : 0;
   const next = images[index + 1];
