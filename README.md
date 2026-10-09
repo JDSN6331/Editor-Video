@@ -52,5 +52,7 @@ O frontend e o renderizador de video sao processos separados:
 Em desenvolvimento, o Vite encaminha `/api/render/*` e `/api/transcode/*` para
 `http://127.0.0.1:3001`. Em producao, publique o backend como um segundo servico
 no Easypanel usando `Dockerfile.backend` e defina `VITE_RENDER_API_URL` no build
-do frontend com a URL HTTPS publica desse servico. A API de renderizacao aceita
-os dominios publicados do frontend definidos no servidor.
+como vazio. No servico do frontend, defina `RENDER_API_INTERNAL_URL` com o
+endereco interno do backend (por exemplo, `http://editor-video-backend:3001`).
+O navegador usa `/api`, e o frontend encaminha as requisicoes ao renderizador
+sem expor o dominio separado do backend nem depender de CORS.

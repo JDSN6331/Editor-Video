@@ -10,6 +10,48 @@ type ServerEntry = {
 
 let serverEntryPromise: Promise<ServerEntry> | undefined;
 
+const renderApiInternalUrl = String(process.env["RENDER_API_INTERNAL_URL"] || "").replace(
+  /\/$/,
+  "",
+);
+
+async function proxyRenderApi(request: Request): Promise<Response | null> {
+  if (!renderApiInternalUrl) return null;
+
+  const sourceUrl = new URL(request.url);
+  if (
+    !sourceUrl.pathname.startsWith("/api/render") &&
+    !sourceUrl.pathname.startsWith("/api/transcode")
+  ) {
+    return null;
+  }
+
+  const targetUrl = new URL(`${sourceUrl.pathname}${sourceUrl.search}`, renderApiInternalUrl);
+  const headers = new Headers(request.headers);
+  headers.delete("host");
+  headers.delete("connection");
+
+  const init: RequestInit & { duplex?: "half" } = {
+    method: request.method,
+    headers,
+    redirect: "manual",
+  };
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    init.body = request.body;
+    init.duplex = "half";
+  }
+
+  try {
+    return await fetch(targetUrl, init);
+  } catch (error) {
+    console.error("[render-proxy] falha ao acessar o backend", error);
+    return new Response(
+      JSON.stringify({ error: "O servidor do editor não conseguiu acessar o renderizador." }),
+      { status: 502, headers: { "Content-Type": "application/json; charset=utf-8" } },
+    );
+  }
+}
+
 async function getServerEntry(): Promise<ServerEntry> {
   if (!serverEntryPromise) {
     serverEntryPromise = import("@tanstack/react-start/server-entry").then(
@@ -49,6 +91,9 @@ export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     console.log(`[server.ts fetch] ${request.method} ${new URL(request.url).pathname}`);
     try {
+      const proxiedResponse = await proxyRenderApi(request);
+      if (proxiedResponse) return proxiedResponse;
+
       const apiResponse = await handleApiRequest(request);
       if (apiResponse) return apiResponse;
 
