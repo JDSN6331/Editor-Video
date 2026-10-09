@@ -170,16 +170,16 @@ export function drawFrame(
   const effect = options.motionEffect ?? (options.kenBurns ? "ken-burns" : "dissolve");
   const zoom =
     effect === "ken-burns"
-      ? 1.035 + 0.025 * easedProgress
+      ? 1.05 + 0.1 * easedProgress
       : effect === "zoom"
-        ? 1 + 0.025 * easedProgress
+        ? 1 + 0.12 * easedProgress
         : effect === "zoom-out"
-          ? 1.025 - 0.025 * easedProgress
+          ? 1.12 - 0.12 * easedProgress
           : effect === "pan"
-            ? 1.06
+            ? 1.25
             : 1;
   const horizontalPosition =
-    effect === "ken-burns" ? 0.2 + 0.6 * easedProgress : effect === "pan" ? easedProgress : 0.5;
+    effect === "ken-burns" ? 0.2 + 0.6 * easedProgress : effect === "pan" ? progress : 0.5;
   const current = images[index];
   if (current instanceof HTMLVideoElement && Number.isFinite(current.duration)) {
     const target = Math.min(Math.max(0, current.duration - 0.05), local % current.duration);

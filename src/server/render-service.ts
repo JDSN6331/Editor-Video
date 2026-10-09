@@ -493,16 +493,16 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
     const motion =
       metadata.motionEffect === "ken-burns"
         ? zoompan(
-            `1.035+0.025*${smooth}`,
+            `1.05+0.1*${smooth}`,
             `(iw-iw/zoom)*(0.2+0.6*${smooth})`,
             `(ih-ih/zoom)*(0.3+0.4*${smooth})`,
           )
         : metadata.motionEffect === "zoom"
-          ? zoompan(`1+0.025*${smooth}`, "(iw-iw/zoom)/2", "(ih-ih/zoom)/2")
+          ? zoompan(`1+0.12*${smooth}`, "(iw-iw/zoom)/2", "(ih-ih/zoom)/2")
           : metadata.motionEffect === "zoom-out"
-            ? zoompan(`1.025-0.025*${smooth}`, "(iw-iw/zoom)/2", "(ih-ih/zoom)/2")
+            ? zoompan(`1.12-0.12*${smooth}`, "(iw-iw/zoom)/2", "(ih-ih/zoom)/2")
             : metadata.motionEffect === "pan"
-              ? zoompan("1.06", `(iw-iw/zoom)*${smooth}`, "(ih-ih/zoom)/2")
+              ? zoompan("1.25", `(iw-iw/zoom)*(on/${frameDivisor})`, "(ih-ih/zoom)/2")
               : `,scale=${metadata.width}:${metadata.height}`;
     const detail = `Cena ${index + 1} de ${media.length}`;
     const commonInput =
