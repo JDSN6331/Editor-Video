@@ -13,9 +13,15 @@ import {
 } from "./render-service";
 
 function corsHeaders(req: IncomingMessage): Record<string, string> {
-  const configuredOrigin = process.env["FRONTEND_ORIGIN"]?.trim();
-  const requestOrigin = req.headers.origin;
-  const allowedOrigin = configuredOrigin || requestOrigin || "*";
+  const configuredOrigins = (process.env["FRONTEND_ORIGIN"] || "")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+  const requestOrigin = req.headers.origin?.replace(/\/$/, "");
+  const allowedOrigin =
+    requestOrigin && (configuredOrigins.length === 0 || configuredOrigins.includes(requestOrigin))
+      ? requestOrigin
+      : configuredOrigins[0] || "*";
   return {
     "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
