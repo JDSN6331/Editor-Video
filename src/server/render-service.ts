@@ -476,6 +476,10 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   // oscilar entre pixels e dava a impressão de imagem tremendo.
   const scaledWidth = metadata.width * 4;
   const scaledHeight = metadata.height * 4;
+  // O Canvas do preview interpola coordenadas fracionarias. Gerar o quadro
+  // animado em 2x antes da reducao preserva a mesma suavidade subpixel no FFmpeg.
+  const motionWidth = metadata.width * 2;
+  const motionHeight = metadata.height * 2;
   const frames = Math.max(1, Math.ceil(perImage * metadata.fps));
   // Duas amostras temporais por quadro reduzem o judder dos deslocamentos
   // lentos sem mudar o FPS, a duracao ou a velocidade escolhidos pelo usuario.
@@ -496,7 +500,7 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
     const frameDivisor = Math.max(1, motionFrames - 1);
     const smooth = `(3*(on/${frameDivisor})*(on/${frameDivisor})-2*(on/${frameDivisor})*(on/${frameDivisor})*(on/${frameDivisor}))`;
     const zoompan = (z: string, x: string, y: string) =>
-      `,zoompan=z='${z}':x='${x}':y='${y}':d=${motionFrames}:s=${metadata.width}x${metadata.height}:fps=${motionFps}`;
+      `,zoompan=z='${z}':x='${x}':y='${y}':d=${motionFrames}:s=${motionWidth}x${motionHeight}:fps=${motionFps}`;
     const motion =
       metadata.motionEffect === "ken-burns"
         ? zoompan(
@@ -543,7 +547,7 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
             ? `${staticBase},fps=${metadata.fps},setsar=1,format=yuv420p`
             : metadata.motionEffect === "none"
               ? `${staticBase},setsar=1,format=yuv420p`
-              : `${animatedBase}${motion},tmix=frames=2:weights='1 1',fps=${metadata.fps},setsar=1,format=yuv420p`,
+              : `${animatedBase}${motion},scale=${metadata.width}:${metadata.height}:flags=lanczos,tmix=frames=2:weights='1 1',fps=${metadata.fps},setsar=1,format=yuv420p`,
         ];
     segmentArgs.push(
       "-frames:v",
