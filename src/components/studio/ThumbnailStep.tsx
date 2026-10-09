@@ -152,8 +152,8 @@ export function ThumbnailStep() {
         <div className="space-y-4">
           <canvas ref={canvasRef} className="w-full rounded-xl border border-border bg-black" />
           <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <Label className="text-xs text-muted-foreground">Título</Label>
+            <div className="min-w-0">
+              <Label className="whitespace-nowrap text-xs text-muted-foreground">Título</Label>
               <Input
                 value={thumbTitle}
                 onChange={(e) => setThumbTitle(e.target.value)}
@@ -161,8 +161,10 @@ export function ThumbnailStep() {
                 className="mt-1 bg-secondary/40"
               />
             </div>
-            <div>
-              <Label className="text-xs text-muted-foreground">Chamada (opcional)</Label>
+            <div className="min-w-0">
+              <Label className="whitespace-nowrap text-xs text-muted-foreground">
+                Chamada (opcional)
+              </Label>
               <Input
                 value={thumbSubtitle}
                 onChange={(e) => setThumbSubtitle(e.target.value)}
@@ -170,47 +172,53 @@ export function ThumbnailStep() {
               />
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="text-xs text-muted-foreground">Cor:</span>
-            {ACCENTS.map((c) => (
-              <button
-                type="button"
-                key={c}
-                onClick={() => setAccent(c)}
-                aria-label={`Cor ${c}`}
-                className="size-6 rounded-full border-2"
-                style={{
-                  background: c,
-                  borderColor: accent === c ? "#fff" : "transparent",
-                }}
-              />
-            ))}
-            <span className="ml-3 text-xs text-muted-foreground">Imagem:</span>
-            <div className="flex gap-1">
-              {images.slice(0, 8).map((img, i) => (
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-xs text-muted-foreground">Cor:</span>
+              {ACCENTS.map((c) => (
                 <button
                   type="button"
-                  key={img.id}
-                  onClick={() => setThumbIndex(i)}
-                  className="overflow-hidden rounded border-2"
+                  key={c}
+                  onClick={() => setAccent(c)}
+                  aria-label={`Cor ${c}`}
+                  className="size-6 rounded-full border-2"
                   style={{
-                    borderColor: thumbIndex === i ? accent : "transparent",
+                    background: c,
+                    borderColor: accent === c ? "#fff" : "transparent",
                   }}
-                >
-                  <img
-                    src={img.kind === "video" ? img.posterUrl : img.url}
-                    alt=""
-                    className="h-8 w-14 object-cover"
-                  />
-                </button>
+                />
               ))}
+            </div>
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="mt-2 shrink-0 text-xs text-muted-foreground">Imagem:</span>
+              <div className="flex min-w-0 flex-1 flex-wrap gap-1">
+                {images.map((img, i) => (
+                  <button
+                    type="button"
+                    key={img.id}
+                    onClick={() => setThumbIndex(i)}
+                    aria-label={`Selecionar imagem ${i + 1}`}
+                    aria-pressed={thumbIndex === i}
+                    className="overflow-hidden rounded border-2"
+                    style={{
+                      borderColor: thumbIndex === i ? accent : "transparent",
+                    }}
+                  >
+                    <img
+                      src={img.kind === "video" ? img.posterUrl : img.url}
+                      alt=""
+                      className="h-8 w-14 object-cover"
+                    />
+                  </button>
+                ))}
+              </div>
             </div>
             {thumbnailReady ? (
               <Button
                 type="button"
                 size="sm"
                 variant="secondary"
-                className="ml-auto"
+                className="self-end"
                 onClick={handleDownload}
                 disabled={isDownloading}
               >
@@ -218,7 +226,7 @@ export function ThumbnailStep() {
                 {isDownloading ? "Gerando PNG..." : "Baixar thumbnail"}
               </Button>
             ) : (
-              <Button type="button" size="sm" variant="secondary" className="ml-auto" disabled>
+              <Button type="button" size="sm" variant="secondary" className="self-end" disabled>
                 <Download className="size-4" /> Preparando thumbnail...
               </Button>
             )}
