@@ -9,10 +9,7 @@ interface ServerStatus {
   diagnostic?: string;
 }
 
-const TRANSCODE_API_BASE = String(import.meta.env["VITE_TRANSCODE_API_URL"] || "").replace(
-  /\/$/,
-  "",
-);
+const TRANSCODE_API_BASE = "";
 
 function apiUrl(path: string): string {
   return `${TRANSCODE_API_BASE}${path}`;

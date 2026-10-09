@@ -64,11 +64,9 @@ type SourceDescriptor = {
   blob?: Blob;
 };
 
-// Vazio em desenvolvimento: o Vite encaminha /api ao backend da porta 3001.
-// Em producao, use a URL publica do servico de renderizacao no Easypanel.
-const API_BASE = String(
-  import.meta.env["VITE_RENDER_API_URL"] || import.meta.env["VITE_TRANSCODE_API_URL"] || "",
-).replace(/\/$/, "");
+// O navegador usa sempre a mesma origem. Em producao, o servidor do frontend
+// encaminha /api ao renderizador pela rede interna.
+const API_BASE = "";
 
 /** Fatia da barra de progresso reservada ao envio das mídias; o resto é a montagem. */
 const UPLOAD_SHARE = 0.08;
