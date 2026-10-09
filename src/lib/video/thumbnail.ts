@@ -100,7 +100,10 @@ export function drawThumbnail(canvas: HTMLCanvasElement, opts: ThumbnailOptions)
   const subtitleTop = subtitleLayout
     ? subtitleBottom - (subtitleLayout.lines.length - 1) * subtitleLineHeight
     : subtitleBottom;
-  const bottom = subtitleLayout ? subtitleTop - 42 : h - 64;
+  const titleSubtitleGap = 24;
+  const bottom = subtitleLayout
+    ? subtitleTop - subtitleLayout.fontSize - titleSubtitleGap
+    : h - 64;
   const startY = bottom - (lines.length - 1) * lineHeight;
 
   // barra de destaque
