@@ -12,16 +12,17 @@ import {
   cancelGoogleDriveUpload,
 } from "./render-service";
 
+const ALLOWED_FRONTEND_ORIGINS = new Set([
+  "https://www.editorvideo.duquelabs.com.br",
+  "https://crc-comercial-insumos-editor-video.br1rfu.easypanel.host",
+]);
+
 function corsHeaders(req: IncomingMessage): Record<string, string> {
-  const configuredOrigins = (process.env["FRONTEND_ORIGIN"] || "")
-    .split(",")
-    .map((origin) => origin.trim().replace(/\/$/, ""))
-    .filter(Boolean);
   const requestOrigin = req.headers.origin?.replace(/\/$/, "");
   const allowedOrigin =
-    requestOrigin && (configuredOrigins.length === 0 || configuredOrigins.includes(requestOrigin))
+    requestOrigin && ALLOWED_FRONTEND_ORIGINS.has(requestOrigin)
       ? requestOrigin
-      : configuredOrigins[0] || "*";
+      : "https://www.editorvideo.duquelabs.com.br";
   return {
     "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
