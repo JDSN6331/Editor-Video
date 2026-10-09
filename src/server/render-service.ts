@@ -477,6 +477,10 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   const scaledWidth = metadata.width * 4;
   const scaledHeight = metadata.height * 4;
   const frames = Math.max(1, Math.ceil(perImage * metadata.fps));
+  // Duas amostras temporais por quadro reduzem o judder dos deslocamentos
+  // lentos sem mudar o FPS, a duracao ou a velocidade escolhidos pelo usuario.
+  const motionFps = metadata.fps * 2;
+  const motionFrames = Math.max(1, Math.ceil(perImage * motionFps));
   const segmentPaths: string[] = [];
   console.log(
     `[render-service] job=${id} iniciando ${media.length} segmentos em ${metadata.width}x${metadata.height}@${metadata.fps}`,
@@ -489,10 +493,10 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
     // O caminho estatico evita zoompan e reamostragem redundante: cada quadro
     // recebe exatamente a mesma geometria.
     const staticBase = `scale=${metadata.width}:${metadata.height}:force_original_aspect_ratio=increase,crop=${metadata.width}:${metadata.height}`;
-    const frameDivisor = Math.max(1, frames - 1);
+    const frameDivisor = Math.max(1, motionFrames - 1);
     const smooth = `(3*(on/${frameDivisor})*(on/${frameDivisor})-2*(on/${frameDivisor})*(on/${frameDivisor})*(on/${frameDivisor}))`;
     const zoompan = (z: string, x: string, y: string) =>
-      `,zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=${metadata.width}x${metadata.height}:fps=${metadata.fps}`;
+      `,zoompan=z='${z}':x='${x}':y='${y}':d=${motionFrames}:s=${metadata.width}x${metadata.height}:fps=${motionFps}`;
     const motion =
       metadata.motionEffect === "ken-burns"
         ? zoompan(
@@ -539,7 +543,7 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
             ? `${staticBase},fps=${metadata.fps},setsar=1,format=yuv420p`
             : metadata.motionEffect === "none"
               ? `${staticBase},setsar=1,format=yuv420p`
-              : `${animatedBase}${motion},setsar=1,format=yuv420p`,
+              : `${animatedBase}${motion},tmix=frames=2:weights='1 1',fps=${metadata.fps},setsar=1,format=yuv420p`,
         ];
     segmentArgs.push(
       "-frames:v",
