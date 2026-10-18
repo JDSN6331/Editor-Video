@@ -30,6 +30,8 @@ interface ServerRenderOptions {
   kenBurns: boolean;
   motionEffect: MotionEffect;
   fade: number;
+  /** Intervalo exato de cada mídia (mesma ordem de `images`). */
+  scenes?: Array<{ start: number; end: number }>;
   format: "mp4" | "webm";
   onProgress?: (
     progress: number,
@@ -365,6 +367,7 @@ export async function renderVideoOnServer(
           kenBurns: options.kenBurns,
           motionEffect: options.motionEffect,
           fade: options.fade,
+          scenes: options.scenes ?? null,
           format: options.format,
           captions: options.captions,
         },

@@ -1,4 +1,5 @@
 import type { Caption, MotionEffect } from "./types";
+import { sceneIndexAt } from "./scenes";
 
 /** Desenha a imagem cobrindo todo o quadro (crop central) com zoom opcional. */
 export function drawCover(
@@ -153,17 +154,29 @@ export function drawFrame(
   w: number,
   h: number,
   captions: Caption[] | null,
-  options: { kenBurns: boolean; fade: number; motionEffect?: MotionEffect } = {
+  options: {
+    kenBurns: boolean;
+    fade: number;
+    motionEffect?: MotionEffect | undefined;
+    /** Intervalo exato de cada mídia; sem isso o tempo é dividido igualmente. */
+    scenes?: Array<{ start: number; end: number }>;
+  } = {
     kenBurns: true,
     fade: 0.6,
   },
 ) {
   if (!images.length || !Number.isFinite(duration) || duration <= 0) return;
   const safeTime = Math.max(0, Math.min(Number.isFinite(t) ? t : 0, duration));
-  const perImage = duration / Math.max(1, images.length);
-  const index = Math.max(0, Math.min(images.length - 1, Math.floor(safeTime / perImage)));
-  const local = safeTime - index * perImage;
-  const progress = perImage > 0 ? local / perImage : 0;
+  const scenes = options.scenes?.length ? options.scenes : null;
+  const evenSize = duration / Math.max(1, images.length);
+  const index = scenes
+    ? sceneIndexAt(scenes, safeTime)
+    : Math.max(0, Math.min(images.length - 1, Math.floor(safeTime / evenSize)));
+  const sceneStart = scenes ? scenes[index]!.start : index * evenSize;
+  const sceneEnd = scenes ? scenes[index]!.end : sceneStart + evenSize;
+  const perImage = Math.max(0.001, sceneEnd - sceneStart);
+  const local = Math.max(0, safeTime - sceneStart);
+  const progress = Math.min(1, local / perImage);
 
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, w, h);
@@ -190,11 +203,19 @@ export function drawFrame(
   }
   if (current) drawCover(ctx, current, w, h, zoom, 1, horizontalPosition, verticalPosition);
 
-  const fade = effect === "dissolve" ? options.fade : 0;
-  const next = images[index + 1];
-  if (next && fade > 0 && perImage - local < fade) {
-    const alpha = 1 - (perImage - local) / fade;
-    drawCover(ctx, next, w, h, 1, alpha, 0.5);
+  // O fade passa pelo preto dentro do próprio intervalo. Uma mídia nunca aparece
+  // antes do início da cena dela, inclusive no preview.
+  const fade = effect === "dissolve" ? Math.min(options.fade, perImage / 2) : 0;
+  if (current && fade > 0) {
+    const alpha =
+      local < fade ? 1 - local / fade : perImage - local < fade ? 1 - (perImage - local) / fade : 0;
+    if (alpha > 0) {
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, alpha);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, w, h);
+      ctx.restore();
+    }
   }
 
   if (captions) {

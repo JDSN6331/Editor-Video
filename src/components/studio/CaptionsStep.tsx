@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import {
   Subtitles,
   Sparkles,
@@ -35,46 +35,11 @@ export function CaptionsStep() {
     isCustomizedCaptions,
     updateCaption,
     resetCaptionsToAuto,
+    playingNarrationPreview,
+    playNarrationPreview,
   } = useVideoProject();
 
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [playingIndex, setPlayingIndex] = useState<number | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const stopTimeoutRef = useRef<number | null>(null);
-
-  const playSnippet = (start: number, end: number, index: number) => {
-    if (!narration?.url) return;
-
-    if (stopTimeoutRef.current) {
-      window.clearTimeout(stopTimeoutRef.current);
-      stopTimeoutRef.current = null;
-    }
-
-    if (audioRef.current) {
-      audioRef.current.pause();
-    }
-
-    if (playingIndex === index) {
-      setPlayingIndex(null);
-      return;
-    }
-
-    const audio = new Audio(narration.url);
-    audioRef.current = audio;
-    audio.currentTime = start;
-    audio.play();
-    setPlayingIndex(index);
-
-    const durMs = Math.max(300, (end - start) * 1000);
-    stopTimeoutRef.current = window.setTimeout(() => {
-      audio.pause();
-      setPlayingIndex(null);
-    }, durMs);
-
-    audio.onended = () => {
-      setPlayingIndex(null);
-    };
-  };
 
   return (
     <StepCard
@@ -210,7 +175,8 @@ export function CaptionsStep() {
               const prev = captions[i - 1];
               const pauseBefore = prev ? c.start - prev.end : 0;
               const hasPause = pauseBefore >= 0.4;
-              const isPlaying = playingIndex === i;
+              const previewKey = `caption:${i}`;
+              const isPlaying = playingNarrationPreview === previewKey;
 
               return (
                 <li key={i} className="space-y-1">
@@ -225,7 +191,7 @@ export function CaptionsStep() {
                     {/* Botão de ouvir trecho */}
                     <button
                       type="button"
-                      onClick={() => playSnippet(c.start, c.end, i)}
+                      onClick={() => void playNarrationPreview(previewKey, c.start, c.end)}
                       disabled={!narration}
                       title="Ouvir este trecho de áudio"
                       className={`mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border transition-colors ${

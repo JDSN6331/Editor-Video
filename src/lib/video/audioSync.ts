@@ -33,6 +33,18 @@ export interface VADOptions {
   padSec?: number;
 }
 
+export interface SceneSpeechRange {
+  start: number;
+  end: number;
+  speechStart?: number;
+  speechEnd?: number;
+}
+
+export interface AudioSyncOptions extends VADOptions {
+  /** Limites detectados das cenas usados para impedir que texto/legenda atravesse uma pausa. */
+  sceneRanges?: readonly SceneSpeechRange[];
+}
+
 /**
  * Analisa o AudioBuffer da narração usando Web Audio API (offline e instantâneo).
  * Detecta quando há fala ativa e quando há pausas reais de silêncio.
@@ -60,6 +72,7 @@ export function analyzeAudioSpeech(
 
   const windowSize = Math.max(64, Math.floor((sampleRate * windowMs) / 1000));
   const numWindows = Math.floor(totalSamples / windowSize);
+  const windowDurationSec = windowSize / sampleRate;
 
   // Canais de áudio
   const channelData: Float32Array[] = [];
@@ -76,15 +89,17 @@ export function analyzeAudioSpeech(
     let sumSquares = 0;
 
     for (let i = 0; i < windowSize; i++) {
-      let sampleVal = 0;
+      let channelSquares = 0;
       for (let c = 0; c < channels; c++) {
         const chan = channelData[c];
         if (chan) {
-          sampleVal += chan[offset + i] || 0;
+          const sample = chan[offset + i] || 0;
+          channelSquares += sample * sample;
         }
       }
-      sampleVal /= channels;
-      sumSquares += sampleVal * sampleVal;
+      // Mede a energia de cada canal antes da média. Somar as amplitudes primeiro
+      // pode cancelar uma voz estéreo com canais em polaridade oposta.
+      sumSquares += channelSquares / channels;
     }
 
     const rms = Math.sqrt(sumSquares / windowSize);
@@ -128,7 +143,7 @@ export function analyzeAudioSpeech(
   }
 
   // 4. Suavização: silêncios menores que minSilenceSec são considerados parte da fala
-  const minSilenceWindows = Math.floor((minSilenceSec * 1000) / windowMs);
+  const minSilenceWindows = Math.ceil(minSilenceSec / windowDurationSec);
   let silenceCount = 0;
   let lastSpeechIdx = -1;
 
@@ -148,7 +163,7 @@ export function analyzeAudioSpeech(
   }
 
   // 5. Agrupa em segmentos de fala e pausas
-  const minSpeechWindows = Math.floor((minSpeechSec * 1000) / windowMs);
+  const minSpeechWindows = Math.ceil(minSpeechSec / windowDurationSec);
   const rawSegments: { startWindow: number; endWindow: number }[] = [];
   let inSpeech = false;
   let segStart = 0;
@@ -183,8 +198,8 @@ export function analyzeAudioSpeech(
     const raw = rawSegments[i];
     if (!raw) continue;
     // Pré-roll curto aproxima a legenda do ataque real da primeira palavra.
-    let start = Math.max(0, (raw.startWindow * windowMs) / 1000 - padSec * 0.4);
-    const end = Math.min(duration, (raw.endWindow * windowMs) / 1000 + padSec);
+    let start = Math.max(0, raw.startWindow * windowDurationSec - padSec * 0.4);
+    const end = Math.min(duration, raw.endWindow * windowDurationSec + padSec);
 
     // Evita sobreposição com segmento anterior
     const lastSeg = segments[segments.length - 1];
@@ -246,6 +261,136 @@ function estimateSpeechUnits(text: string): number {
   );
 }
 
+function boundaryStrength(word: string): number {
+  const withoutClosers = word.replace(/["'”’»)\]}]+$/g, "");
+  if (/[.!?…]$/.test(withoutClosers)) return 1;
+  if (/[;:]$/.test(withoutClosers)) return 0.7;
+  if (/[,]$/.test(withoutClosers)) return 0.4;
+  return 0;
+}
+
+function speechRangeDuration(range: SceneSpeechRange): number {
+  const start = range.speechStart ?? range.start;
+  const end = range.speechEnd ?? range.end;
+  return Math.max(0.05, end - start);
+}
+
+/**
+ * Divide o roteiro uma única vez e em ordem entre as cenas detectadas.
+ *
+ * Cada palavra pertence a exatamente uma cena. A duração falada define a posição
+ * aproximada e a pontuação próxima funciona como âncora para as pausas do locutor.
+ * Isso evita o comportamento anterior de atribuir blocos inteiros pelo ponto médio
+ * ou repartir frases igualmente entre cenas de durações muito diferentes.
+ */
+export function alignScriptToScenes(
+  script: string,
+  sceneRanges: readonly SceneSpeechRange[],
+): string[] {
+  if (!sceneRanges.length) return [];
+
+  const words = script.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  if (!words.length) return sceneRanges.map(() => "");
+
+  const wordUnits = words.map(estimateSpeechUnits);
+  const prefixUnits = new Array<number>(words.length + 1).fill(0);
+  for (let i = 0; i < wordUnits.length; i++) {
+    prefixUnits[i + 1] = prefixUnits[i]! + wordUnits[i]!;
+  }
+
+  const totalUnits = prefixUnits.at(-1) ?? 0;
+  const sceneDurations = sceneRanges.map(speechRangeDuration);
+  const totalSceneDuration = sceneDurations.reduce((sum, value) => sum + value, 0);
+  const canFillEveryScene = words.length >= sceneRanges.length;
+  const boundaries: number[] = [0];
+  let consumedDuration = 0;
+  let previousBoundary = 0;
+
+  for (let sceneIndex = 0; sceneIndex < sceneRanges.length - 1; sceneIndex++) {
+    // Recalcula a velocidade com o texto e o áudio que ainda restam. Assim um
+    // pequeno erro anterior é diluído pelas cenas seguintes, em vez de adiantar
+    // uma frase inteira para compensar tudo na próxima fronteira.
+    const remainingDuration = Math.max(0.05, totalSceneDuration - consumedDuration);
+    const remainingUnits = Math.max(1, totalUnits - prefixUnits[previousBoundary]!);
+    const expectedSceneUnits = Math.max(
+      1,
+      (sceneDurations[sceneIndex]! / remainingDuration) * remainingUnits,
+    );
+    const targetUnits = prefixUnits[previousBoundary]! + expectedSceneUnits;
+    const remainingScenes = sceneRanges.length - sceneIndex - 1;
+    const minBoundary = Math.min(words.length, previousBoundary + (canFillEveryScene ? 1 : 0));
+    const maxBoundary = Math.max(
+      minBoundary,
+      words.length - (canFillEveryScene ? remainingScenes : 0),
+    );
+    let bestBoundary = minBoundary;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (let boundary = minBoundary; boundary <= maxBoundary; boundary++) {
+      const distance = Math.abs(prefixUnits[boundary]! - targetUnits) / expectedSceneUnits;
+      const punctuation = boundary > 0 ? boundaryStrength(words[boundary - 1]!) : 0;
+      // A pontuação só influencia âncoras razoavelmente próximas do tempo esperado;
+      // assim uma frase muito longa não desloca todas as cenas seguintes.
+      const punctuationBonus = distance <= 0.45 ? punctuation * 0.22 : 0;
+      const score = distance - punctuationBonus;
+      if (score < bestScore) {
+        bestScore = score;
+        bestBoundary = boundary;
+      }
+    }
+
+    boundaries.push(bestBoundary);
+    previousBoundary = bestBoundary;
+    consumedDuration += sceneDurations[sceneIndex]!;
+  }
+  boundaries.push(words.length);
+
+  return sceneRanges.map((_, index) =>
+    words
+      .slice(boundaries[index]!, boundaries[index + 1]!)
+      .join(" ")
+      .trim(),
+  );
+}
+
+/** Gera legendas que nunca ultrapassam o intervalo de fala da respectiva cena. */
+export function buildSceneAlignedCaptions(
+  script: string,
+  sceneRanges: readonly SceneSpeechRange[],
+  maxChars = 90,
+): { captions: Caption[]; sceneTexts: string[] } {
+  const sceneTexts = alignScriptToScenes(script, sceneRanges);
+  const captions: Caption[] = [];
+
+  sceneTexts.forEach((sceneText, sceneIndex) => {
+    const range = sceneRanges[sceneIndex];
+    if (!range || !sceneText) return;
+
+    const start = range.speechStart ?? range.start;
+    const end = range.speechEnd ?? range.end;
+    if (end <= start) return;
+
+    const blocks = splitScript(sceneText, maxChars);
+    const blockUnits = blocks.map(estimateSpeechUnits);
+    const totalBlockUnits = blockUnits.reduce((sum, value) => sum + value, 0);
+    let cursor = start;
+
+    blocks.forEach((text, blockIndex) => {
+      const isLast = blockIndex === blocks.length - 1;
+      const blockEnd = isLast
+        ? end
+        : cursor + ((blockUnits[blockIndex] ?? 1) / totalBlockUnits) * (end - start);
+      captions.push({
+        start: Number(cursor.toFixed(3)),
+        end: Number(blockEnd.toFixed(3)),
+        text,
+      });
+      cursor = blockEnd;
+    });
+  });
+
+  return { captions, sceneTexts };
+}
+
 /**
  * Cria legendas sincronizadas com o áudio, respeitando pausas da narração.
  * Durante pausas longas do narrador, a legenda anterior é encerrada e a próxima
@@ -256,7 +401,7 @@ export function buildAudioSyncedCaptions(
   buffer: AudioBuffer | null,
   duration: number,
   maxChars = 90,
-  options?: VADOptions,
+  options?: AudioSyncOptions,
 ): { captions: Caption[]; pausesCount: number } {
   const blocks = splitScript(script, maxChars);
   if (!blocks.length || duration <= 0) {
@@ -277,8 +422,16 @@ export function buildAudioSyncedCaptions(
   }
 
   // Analisa fala e pausas no áudio
-  const analysis = analyzeAudioSpeech(buffer, options);
+  const { sceneRanges, ...vadOptions } = options ?? {};
+  const analysis = analyzeAudioSpeech(buffer, vadOptions);
   const { segments, pauses, totalSpeechSec } = analysis;
+
+  if (sceneRanges?.length) {
+    const aligned = buildSceneAlignedCaptions(script, sceneRanges, maxChars);
+    if (aligned.captions.length > 0) {
+      return { captions: aligned.captions, pausesCount: pauses.length };
+    }
+  }
 
   if (segments.length === 0 || totalSpeechSec <= 0) {
     // Fallback proporcional

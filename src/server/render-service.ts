@@ -41,6 +41,8 @@ interface RenderMetadata {
   fade: number;
   format: "mp4" | "webm";
   captions: CaptionInput[] | null;
+  /** Início de cada cena na narração (mesma ordem das mídias); null = divisão igual. */
+  scenes: Array<{ start: number; end: number }> | null;
 }
 
 interface RenderJob {
@@ -290,6 +292,16 @@ function validateMetadata(raw: unknown): RenderMetadata {
     : input["kenBurns"] === false
       ? "dissolve"
       : "ken-burns";
+  const rawScenes = Array.isArray(input["scenes"]) ? input["scenes"] : null;
+  const scenes = rawScenes
+    ? rawScenes.slice(0, 200).map((item) => {
+        const scene = (item ?? {}) as Record<string, unknown>;
+        return {
+          start: numberInRange(scene["start"], 0, 0, duration),
+          end: numberInRange(scene["end"], duration, 0, duration),
+        };
+      })
+    : null;
   return {
     width: Math.round(width / 2) * 2,
     height: Math.round(height / 2) * 2,
@@ -302,7 +314,34 @@ function validateMetadata(raw: unknown): RenderMetadata {
     fade: numberInRange(input["fade"], 0.6, 0, 1.5),
     format: input["format"] === "webm" ? "webm" : "mp4",
     captions,
+    scenes,
   };
+}
+
+/**
+ * Início de cada cena na narração. Na ausência de intervalos, mantém o fallback
+ * legado uniforme; intervalos enviados precisam corresponder 1:1 às mídias.
+ */
+function resolveSceneStarts(
+  scenes: RenderMetadata["scenes"],
+  mediaCount: number,
+  duration: number,
+): number[] {
+  const even = Array.from({ length: mediaCount }, (_, index) => (index * duration) / mediaCount);
+  if (!scenes) return even;
+  if (scenes.length !== mediaCount) {
+    throw new Error(
+      `A montagem exige uma mídia por trecho da narração (${mediaCount} mídias para ${scenes.length} trechos).`,
+    );
+  }
+  const starts = scenes.map((scene, index) => (index === 0 ? 0 : scene.start));
+  const valid = starts.every(
+    (start, index) => start < duration && (index === 0 || start > starts[index - 1]!),
+  );
+  if (!valid) {
+    throw new Error("Os limites dos trechos da narração são inválidos ou não estão ordenados.");
+  }
+  return starts;
 }
 
 function assTime(seconds: number): string {
@@ -471,7 +510,13 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   const outputPath = path.join(workDir, metadata.format === "webm" ? "output.webm" : "output.mp4");
 
   const finalWeight = 1 - SEGMENTS_WEIGHT - CONCAT_WEIGHT;
-  const perImage = metadata.duration / media.length;
+  // Cada cena dura exatamente o trecho da narração dela. Os limites são arredondados
+  // para quadros de forma cumulativa, assim o erro não se acumula entre as cenas e
+  // as trocas ficam alinhadas com a fala e as legendas do início ao fim.
+  const sceneStarts = resolveSceneStarts(metadata.scenes, media.length, metadata.duration);
+  const boundaryFrames = [...sceneStarts, metadata.duration].map((time) =>
+    Math.round(time * metadata.fps),
+  );
   // A superfície 4x reduz o arredondamento do zoompan que fazia o centro
   // oscilar entre pixels e dava a impressão de imagem tremendo.
   const scaledWidth = metadata.width * 4;
@@ -480,11 +525,9 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   // animado em 2x antes da reducao preserva a mesma suavidade subpixel no FFmpeg.
   const motionWidth = metadata.width * 2;
   const motionHeight = metadata.height * 2;
-  const frames = Math.max(1, Math.ceil(perImage * metadata.fps));
   // Duas amostras temporais por quadro reduzem o judder dos deslocamentos
   // lentos sem mudar o FPS, a duracao ou a velocidade escolhidos pelo usuario.
   const motionFps = metadata.fps * 2;
-  const motionFrames = Math.max(1, Math.ceil(perImage * motionFps));
   const segmentPaths: string[] = [];
   console.log(
     `[render-service] job=${id} iniciando ${media.length} segmentos em ${metadata.width}x${metadata.height}@${metadata.fps}`,
@@ -492,6 +535,9 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
 
   for (let index = 0; index < media.length; index += 1) {
     const source = media[index]!;
+    const frames = Math.max(1, boundaryFrames[index + 1]! - boundaryFrames[index]!);
+    const motionFrames = frames * 2;
+    const perImage = frames / metadata.fps;
     const segmentPath = path.join(workDir, `segment-${String(index).padStart(3, "0")}.mp4`);
     const animatedBase = `scale=${scaledWidth}:${scaledHeight}:force_original_aspect_ratio=increase,crop=${scaledWidth}:${scaledHeight}`;
     // O caminho estatico evita zoompan e reamostragem redundante: cada quadro
@@ -520,35 +566,20 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
       source.kind === "video"
         ? ["-y", "-stream_loop", "-1", "-i", source.path]
         : ["-y", "-loop", "1", "-framerate", String(metadata.fps), "-i", source.path];
-    const canDissolve =
-      source.kind === "image" &&
-      media[index + 1]?.kind === "image" &&
-      metadata.motionEffect === "dissolve" &&
-      index < media.length - 1;
-    const dissolveDuration = Math.max(0.1, Math.min(metadata.fade, perImage / 3));
-    const segmentArgs = canDissolve
-      ? [
-          ...commonInput,
-          "-loop",
-          "1",
-          "-framerate",
-          String(metadata.fps),
-          "-i",
-          media[index + 1]!.path,
-          "-filter_complex",
-          `[0:v]${staticBase},setsar=1,format=yuv420p[cur];[1:v]${staticBase},setsar=1,format=yuv420p[next];[cur][next]xfade=transition=fade:duration=${dissolveDuration}:offset=${Math.max(0, perImage - dissolveDuration)}[out]`,
-          "-map",
-          "[out]",
-        ]
-      : [
-          ...commonInput,
-          "-vf",
-          source.kind === "video"
-            ? `${staticBase},fps=${metadata.fps},setsar=1,format=yuv420p`
-            : metadata.motionEffect === "none"
-              ? `${staticBase},setsar=1,format=yuv420p`
-              : `${animatedBase}${motion},scale=${metadata.width}:${metadata.height}:flags=lanczos,tmix=frames=2:weights='1 1',fps=${metadata.fps},setsar=1,format=yuv420p`,
-        ];
+    const dissolveDuration = Math.max(0.01, Math.min(metadata.fade, perImage / 2));
+    const strictDissolve =
+      metadata.motionEffect === "dissolve"
+        ? `,fade=t=in:st=0:d=${dissolveDuration},fade=t=out:st=${Math.max(0, perImage - dissolveDuration)}:d=${dissolveDuration}`
+        : "";
+    const segmentArgs = [
+      ...commonInput,
+      "-vf",
+      source.kind === "video"
+        ? `${staticBase},fps=${metadata.fps},setsar=1,format=yuv420p${strictDissolve}`
+        : metadata.motionEffect === "none" || metadata.motionEffect === "dissolve"
+          ? `${staticBase},setsar=1,format=yuv420p${strictDissolve}`
+          : `${animatedBase}${motion},scale=${metadata.width}:${metadata.height}:flags=lanczos,tmix=frames=2:weights='1 1',fps=${metadata.fps},setsar=1,format=yuv420p`,
+    ];
     segmentArgs.push(
       "-frames:v",
       String(frames),

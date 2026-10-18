@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Play, Pause, RotateCcw, Eye, Sliders, Sparkles } from "lucide-react";
 import { useVideoProject } from "@/contexts/VideoProjectContext";
 import { formatTime } from "@/lib/video/captions";
+import { sceneIndexAt } from "@/lib/video/scenes";
 import { VIDEO_PRESETS } from "@/lib/video/types";
 import { drawFrame } from "@/lib/video/draw";
 import { Button } from "@/components/ui/button";
@@ -20,6 +21,8 @@ export function TimelineSidebar() {
     duration,
     images,
     perImage,
+    scenes,
+    minSceneDuration,
     music,
     effectiveMusicVolume,
     captions,
@@ -40,6 +43,18 @@ export function TimelineSidebar() {
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const [showFramePreview, setShowFramePreview] = useState(true);
 
+  const previewSceneIndex = scenes.length
+    ? sceneIndexAt(scenes, previewTime)
+    : Math.max(0, Math.min(images.length - 1, Math.floor(previewTime / Math.max(0.001, perImage))));
+  const previewSceneStart = scenes[previewSceneIndex]?.start ?? previewSceneIndex * perImage;
+  const previewSceneEnd =
+    scenes[previewSceneIndex]?.end ?? Math.min(duration, previewSceneStart + perImage);
+  const previewSceneDuration = Math.max(0, previewSceneEnd - previewSceneStart);
+  const previewSceneElapsed = Math.max(
+    0,
+    Math.min(previewSceneDuration, previewTime - previewSceneStart),
+  );
+
   // Renderiza o frame no canvas de preview sempre que o previewTime mudar
   useEffect(() => {
     if (!duration || !images.length || !previewCanvasRef.current) return;
@@ -57,7 +72,7 @@ export function TimelineSidebar() {
         canvas.width,
         canvas.height,
         showCaptions ? captions : null,
-        { kenBurns, fade: Math.min(0.6, perImage / 4), motionEffect },
+        { kenBurns, fade: Math.min(0.6, minSceneDuration / 4), motionEffect, scenes },
       );
     } catch (error) {
       // Preview e apenas uma conveniencia visual e nunca deve derrubar o editor.
@@ -72,7 +87,8 @@ export function TimelineSidebar() {
     showCaptions,
     kenBurns,
     motionEffect,
-    perImage,
+    minSceneDuration,
+    scenes,
     showFramePreview,
   ]);
 
@@ -130,10 +146,10 @@ export function TimelineSidebar() {
         )}
       </div>
 
-      {duration && images.length ? (
+      {duration > 0 && (images.length > 0 || scenes.length > 0) ? (
         <>
           {/* Preview de Frame Estático (Fase 1.4) */}
-          {showFramePreview && (
+          {showFramePreview && images.length > 0 && (
             <div className="mt-3 overflow-hidden rounded-xl border border-border bg-black shadow-sm relative group">
               <canvas
                 ref={previewCanvasRef}
@@ -141,8 +157,14 @@ export function TimelineSidebar() {
                 height={216}
                 className="w-full aspect-video block"
               />
-              <div className="absolute top-2 right-2 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-mono text-white/90 backdrop-blur">
-                {formatTime(previewTime, true)}
+              <div
+                className="absolute top-2 right-2 rounded bg-black/75 px-2 py-1 text-[10px] font-mono text-white/90 backdrop-blur"
+                title={`Tempo decorrido na cena ${previewSceneIndex + 1} / duração da cena`}
+              >
+                <span className="mr-1.5 font-sans font-semibold text-white">
+                  Cena {previewSceneIndex + 1}
+                </span>
+                {formatTime(previewSceneElapsed, true)} / {formatTime(previewSceneDuration, true)}
               </div>
             </div>
           )}
@@ -190,20 +212,49 @@ export function TimelineSidebar() {
               className="relative h-10 w-full overflow-hidden rounded-lg border border-border cursor-pointer select-none bg-background/80 group"
               title="Clique para navegar no tempo"
             >
-              {/* Faixas de Imagens */}
+              {/* Faixas de Imagens / Slots de Cena */}
               <div className="flex h-full w-full">
-                {images.map((img, idx) => (
-                  <div
-                    key={img.id}
-                    title={`#${idx + 1} ${img.name} (${perImage.toFixed(1)}s)`}
-                    className="flex-1 border-r border-background/60 bg-cover bg-center last:border-0 relative opacity-90 group-hover:opacity-100 transition-opacity"
-                    style={{ backgroundImage: `url(${img.url})` }}
-                  >
-                    <span className="absolute bottom-0.5 left-0.5 rounded bg-black/70 px-1 text-[9px] text-white font-mono">
-                      {idx + 1}
-                    </span>
-                  </div>
-                ))}
+                {scenes.length > 0
+                  ? scenes.map((scene, idx) => {
+                      const img = images[idx];
+                      const sceneDuration = scene.duration;
+                      return (
+                        <div
+                          key={img?.id ?? `scene-slot-${idx}`}
+                          title={`Cena ${idx + 1} (${formatTime(scene.start)} – ${formatTime(scene.end)} · ${sceneDuration.toFixed(1)}s)${img ? `: ${img.name}` : " (sem mídia encaixada)"}`}
+                          className={`border-r border-background/60 last:border-0 relative transition-opacity ${
+                            img
+                              ? "bg-cover bg-center opacity-90 group-hover:opacity-100"
+                              : "bg-secondary/40 border-dashed opacity-60 flex items-center justify-center text-[9px] text-muted-foreground font-mono"
+                          }`}
+                          style={{
+                            backgroundImage: img ? `url(${img.url})` : undefined,
+                            flexGrow: Math.max(0.0001, sceneDuration),
+                            flexBasis: 0,
+                          }}
+                        >
+                          <span
+                            className={`absolute bottom-0.5 left-0.5 rounded px-1 text-[9px] font-mono ${
+                              img ? "bg-black/70 text-white" : "bg-background/80 text-foreground"
+                            }`}
+                          >
+                            {idx + 1}
+                          </span>
+                        </div>
+                      );
+                    })
+                  : images.map((img, idx) => (
+                      <div
+                        key={img.id}
+                        title={`#${idx + 1} ${img.name} (${perImage.toFixed(1)}s)`}
+                        className="flex-1 border-r border-background/60 bg-cover bg-center last:border-0 relative opacity-90 group-hover:opacity-100 transition-opacity"
+                        style={{ backgroundImage: `url(${img.url})` }}
+                      >
+                        <span className="absolute bottom-0.5 left-0.5 rounded bg-black/70 px-1 text-[9px] text-white font-mono">
+                          {idx + 1}
+                        </span>
+                      </div>
+                    ))}
               </div>
 
               {/* Scrubber / Agulha de Reprodução */}
@@ -246,8 +297,15 @@ export function TimelineSidebar() {
           {/* Estatísticas e Informações do Projeto */}
           <dl className="mt-4 space-y-1.5 border-t border-border pt-3">
             <Row label="Duração Total" value={formatTime(duration, true)} />
-            <Row label="Total de Imagens" value={`${images.length}`} />
-            <Row label="Tempo por Imagem" value={`${perImage.toFixed(2).replace(".", ",")} s`} />
+            <Row label="Cenas Detectadas" value={`${scenes.length || images.length} cena(s)`} />
+            <Row
+              label="Mídias Encaixadas"
+              value={`${images.length} de ${scenes.length || images.length}`}
+            />
+            <Row
+              label="Tempo Médio por Cena"
+              value={`${(duration / Math.max(1, scenes.length || images.length)).toFixed(2).replace(".", ",")} s`}
+            />
             <Row label="Blocos de Legenda" value={`${captions.length}`} />
             <Row
               label="Resolução & FPS"

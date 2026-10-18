@@ -44,7 +44,7 @@ export function StudioHeader() {
           <Stat label="Duração" value={duration ? formatTime(duration) : "—"} />
           <Stat label="Imagens" value={images.length ? String(images.length) : "—"} />
           <Stat
-            label="Tempo por imagem"
+            label="Média por cena"
             value={perImage ? `${perImage.toFixed(3).replace(".", ",")}s` : "—"}
           />
         </div>

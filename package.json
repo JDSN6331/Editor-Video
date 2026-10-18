@@ -9,6 +9,7 @@
     "dev:backend": "npm run build:backend && node --watch dist/render-backend.mjs",
     "build:backend": "esbuild backend/server.ts --bundle --platform=node --format=esm --outfile=dist/render-backend.mjs",
     "start:backend": "node dist/render-backend.mjs",
+    "test": "node --test tests/narration-scenes.test.ts",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",

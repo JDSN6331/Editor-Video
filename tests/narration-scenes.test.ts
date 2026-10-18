@@ -1,0 +1,263 @@
+import assert from "node:assert/strict";
+import { after, before, test } from "node:test";
+import { createServer, type ViteDevServer } from "vite";
+
+interface AudioBufferLike {
+  duration: number;
+  sampleRate: number;
+  numberOfChannels: number;
+  length: number;
+  getChannelData(channel: number): Float32Array;
+}
+
+let vite: ViteDevServer;
+let detectScenesFromAudio: (
+  buffer: AudioBuffer,
+  options?: { minPauseSec: number; minSceneDurationSec: number },
+) => Array<{
+  start: number;
+  end: number;
+  duration: number;
+  speechStart: number;
+  speechEnd: number;
+}>;
+let getSceneScriptText: (
+  captions: Array<{ start: number; end: number; text: string }>,
+  sceneStart: number,
+  sceneEnd: number,
+  script?: string,
+  sceneIndex?: number,
+  totalScenes?: number,
+) => string;
+let normalizeAudioSegment: (
+  start: number,
+  end: number,
+  duration: number,
+) => { start: number; end: number; duration: number } | null;
+let buildAudioSyncedCaptions: (
+  script: string,
+  buffer: AudioBuffer | null,
+  duration: number,
+  maxChars: number,
+  options: {
+    minSilenceSec?: number;
+    sceneRanges: Array<{
+      start: number;
+      end: number;
+      speechStart: number;
+      speechEnd: number;
+    }>;
+  },
+) => {
+  captions: Array<{ start: number; end: number; text: string }>;
+  pausesCount: number;
+};
+let alignScriptToScenes: (
+  script: string,
+  sceneRanges: Array<{
+    start: number;
+    end: number;
+    speechStart: number;
+    speechEnd: number;
+  }>,
+) => string[];
+let formatTime: (seconds: number, ms?: boolean) => string;
+
+before(async () => {
+  vite = await createServer({
+    appType: "custom",
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  ({ detectScenesFromAudio, getSceneScriptText } = await vite.ssrLoadModule(
+    "/src/lib/video/scenes.ts",
+  ));
+  ({ buildAudioSyncedCaptions, alignScriptToScenes } = await vite.ssrLoadModule(
+    "/src/lib/video/audioSync.ts",
+  ));
+  ({ normalizeAudioSegment } = await vite.ssrLoadModule("/src/lib/video/audio.ts"));
+  ({ formatTime } = await vite.ssrLoadModule("/src/lib/video/captions.ts"));
+});
+
+after(async () => {
+  await vite.close();
+});
+
+function syntheticNarration(
+  duration: number,
+  speechRanges: Array<[start: number, end: number]>,
+  channelValues: number[] = [0.5],
+): AudioBuffer {
+  const sampleRate = 16_000;
+  const length = Math.round(duration * sampleRate);
+  const channels = channelValues.map((value) => {
+    const data = new Float32Array(length);
+    for (const [start, end] of speechRanges) {
+      data.fill(value, Math.round(start * sampleRate), Math.round(end * sampleRate));
+    }
+    return data;
+  });
+  const buffer: AudioBufferLike = {
+    duration,
+    sampleRate,
+    numberOfChannels: channels.length,
+    length,
+    getChannelData: (channel) => channels[channel]!,
+  };
+  return buffer as AudioBuffer;
+}
+
+test("quebra a narração nas pausas e mantém cenas contíguas", () => {
+  const buffer = syntheticNarration(9, [
+    [0.5, 2],
+    [3, 5],
+    [6, 8],
+  ]);
+  const scenes = detectScenesFromAudio(buffer, {
+    minPauseSec: 0.7,
+    minSceneDurationSec: 1,
+  });
+
+  assert.equal(scenes.length, 3);
+  assert.equal(scenes[0]!.start, 0);
+  assert.equal(scenes.at(-1)!.end, 9);
+
+  for (const [index, scene] of scenes.entries()) {
+    assert.equal(scene.duration, Number((scene.end - scene.start).toFixed(2)));
+    assert.ok(scene.speechStart >= scene.start);
+    assert.ok(scene.speechEnd <= scene.end);
+    assert.ok(scene.speechEnd > scene.speechStart);
+    if (index > 0) assert.equal(scenes[index - 1]!.end, scene.start);
+  }
+
+  assert.ok(scenes[0]!.end > 2 && scenes[0]!.end < 3);
+  assert.ok(scenes[1]!.end > 5 && scenes[1]!.end < 6);
+});
+
+test("usa 0,45s como pausa mínima padrão para novas cenas", () => {
+  const buffer = syntheticNarration(6, [
+    [0.2, 2],
+    [2.6, 5.8],
+  ]);
+
+  const scenes = detectScenesFromAudio(buffer);
+
+  assert.equal(scenes.length, 2);
+  assert.ok(scenes[0]!.end > 2 && scenes[0]!.end < 2.6);
+});
+
+test("mantém cada trecho do roteiro dentro da respectiva cena de fala", () => {
+  const buffer = syntheticNarration(8, [
+    [0.2, 2.2],
+    [2.8, 4.8],
+    [5.4, 7.4],
+  ]);
+  const scenes = detectScenesFromAudio(buffer, {
+    minPauseSec: 0.45,
+    minSceneDurationSec: 1,
+  });
+  const script = "Primeira parte. Segunda parte. Terceira parte.";
+
+  const { captions } = buildAudioSyncedCaptions(script, buffer, 8, 90, {
+    minSilenceSec: 0.45,
+    sceneRanges: scenes,
+  });
+  const sceneTexts = scenes.map((scene, index) =>
+    getSceneScriptText(captions, scene.speechStart, scene.speechEnd, script, index, scenes.length),
+  );
+
+  assert.deepEqual(sceneTexts, ["Primeira parte.", "Segunda parte.", "Terceira parte."]);
+  assert.equal(sceneTexts.join(" "), script);
+
+  for (const caption of captions) {
+    const owners = scenes.filter(
+      (scene) => caption.start >= scene.speechStart && caption.end <= scene.speechEnd,
+    );
+    assert.equal(owners.length, 1);
+  }
+});
+
+test("não adianta a frase seguinte ao alinhar cenas de durações diferentes", () => {
+  const script =
+    "Primeiro ponto muito detalhado e importante. Segundo ponto breve. Terceiro ponto com explicação adicional. Quarto ponto essencial. O valor da embalagem também precisa entrar na conta. Comparar apenas preços pode enganar.";
+  const speechDurations = [6.052, 2.389, 5.643, 2.408, 9.906];
+  let cursor = 0;
+  const sceneRanges = speechDurations.map((duration) => {
+    const range = {
+      start: cursor,
+      end: cursor + duration,
+      speechStart: cursor,
+      speechEnd: cursor + duration,
+    };
+    cursor += duration + 0.5;
+    return range;
+  });
+
+  const sceneTexts = alignScriptToScenes(script, sceneRanges);
+
+  assert.equal(sceneTexts[3], "Quarto ponto essencial.");
+  assert.match(sceneTexts[4] ?? "", /^O valor da embalagem também/);
+  assert.match(sceneTexts[4] ?? "", /Comparar apenas preços/);
+});
+
+test("não cancela fala estéreo com canais em polaridade oposta", () => {
+  const buffer = syntheticNarration(
+    5,
+    [
+      [0.4, 1.5],
+      [2.5, 4.5],
+    ],
+    [0.5, -0.5],
+  );
+  const scenes = detectScenesFromAudio(buffer, {
+    minPauseSec: 0.7,
+    minSceneDurationSec: 0.5,
+  });
+
+  assert.equal(scenes.length, 2);
+  assert.ok(scenes[0]!.speechStart > 0);
+  assert.ok(scenes[1]!.speechEnd < 5);
+});
+
+test("mantém respirações menores que a pausa mínima dentro da mesma cena", () => {
+  const buffer = syntheticNarration(4, [
+    [0.2, 1.5],
+    [2, 3.7],
+  ]);
+  const scenes = detectScenesFromAudio(buffer, {
+    minPauseSec: 0.7,
+    minSceneDurationSec: 0.5,
+  });
+
+  assert.equal(scenes.length, 1);
+  assert.equal(scenes[0]!.start, 0);
+  assert.equal(scenes[0]!.end, 4);
+});
+
+test("normaliza o intervalo reproduzido para a duração do AudioBuffer", () => {
+  assert.deepEqual(normalizeAudioSegment(-2, 12, 10), {
+    start: 0,
+    end: 10,
+    duration: 10,
+  });
+  assert.deepEqual(normalizeAudioSegment(2.25, 4.75, 10), {
+    start: 2.25,
+    end: 4.75,
+    duration: 2.5,
+  });
+  assert.equal(normalizeAudioSegment(5, 4, 10), null);
+  assert.equal(normalizeAudioSegment(Number.NaN, 4, 10), null);
+});
+
+test("atribui um bloco de roteiro a apenas um lado da fronteira", () => {
+  const captions = [{ start: 1, end: 3, text: "Trecho único" }];
+
+  assert.equal(getSceneScriptText(captions, 0, 2, "", 0, 2), "");
+  assert.equal(getSceneScriptText(captions, 2, 4, "", 1, 2), "Trecho único");
+});
+
+test("normaliza o arredondamento do relógio ao completar um segundo", () => {
+  assert.equal(formatTime(9.9996, true), "00:10,000");
+  assert.equal(formatTime(59.9996, true), "01:00,000");
+  assert.equal(formatTime(Number.NaN, true), "00:00,000");
+});

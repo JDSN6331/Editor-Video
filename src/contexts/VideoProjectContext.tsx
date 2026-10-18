@@ -4,13 +4,24 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import type { Caption, MotionEffect, PresetKey, SourceImage } from "@/lib/video/types";
 import { buildCaptions } from "@/lib/video/captions";
 import { buildAudioSyncedCaptions } from "@/lib/video/audioSync";
-import { decodeAudio } from "@/lib/video/audio";
+import { decodeAudio, normalizeAudioSegment } from "@/lib/video/audio";
+import {
+  assignCaptionParagraphs,
+  buildScenes,
+  DEFAULT_MIN_SCENE_DURATION_SEC,
+  DEFAULT_SCENE_MIN_PAUSE_SEC,
+  detectScenesFromAudio,
+  type DetectedNarrationScene,
+  type Scene,
+  type SceneMode,
+} from "@/lib/video/scenes";
 import { generateId } from "@/lib/uuid";
 import { getDbInfoFn, getProjectFn, saveProjectFn } from "@/api/projects";
 import { toast } from "sonner";
@@ -63,6 +74,10 @@ interface VideoProjectContextType {
   // Narration
   narration: AudioItem | null;
   setNarration: React.Dispatch<React.SetStateAction<AudioItem | null>>;
+  playingNarrationPreview: string | null;
+  playNarrationPreview: (key: string, start: number, end: number) => Promise<void>;
+  stopNarrationPreview: () => void;
+  registerNarrationPlayer: (element: HTMLAudioElement | null) => void;
 
   // Music
   music: AudioItem | null;
@@ -130,11 +145,24 @@ interface VideoProjectContextType {
   // Derived values
   duration: number;
   perImage: number;
+  /** Cenas detectadas diretamente a partir das pausas da narração. */
+  detectedScenes: DetectedNarrationScene[];
+  sceneMinPauseSec: number;
+  setSceneMinPauseSec: (value: number) => void;
+  minSceneDurationSec: number;
+  setMinSceneDurationSec: (value: number) => void;
+  /** Intervalo exato (na narração) em que cada mídia fica em tela. */
+  scenes: Scene[];
+  sceneMode: SceneMode;
+  /** Duração da menor cena (útil para limitar o tempo de transição). */
+  minSceneDuration: number;
   effectiveMusicVolume: number;
   fileLoadProgress: Record<FileLoadKind, FileLoadProgress>;
 
-  // Audio loading
+  // Audio loading & Scene slot assignment
   loadAudio: (file: File, kind: "narration" | "music") => Promise<void>;
+  replaceImageAt: (index: number, file: File) => Promise<void>;
+  setImageForScene: (sceneIndex: number, file: File) => Promise<void>;
 }
 
 const VideoProjectContext = createContext<VideoProjectContextType | null>(null);
@@ -246,6 +274,39 @@ function loadVideoPreview(source: string): Promise<{
   });
 }
 
+async function loadSingleMedia(file: File): Promise<SourceImage> {
+  const dataUrl = await fileToDataUrl(file);
+  if (file.type.startsWith("video/")) {
+    const { element, duration, posterUrl } = await loadVideoPreview(dataUrl);
+    return {
+      id: `${file.name}-${generateId()}`,
+      name: file.name,
+      url: dataUrl,
+      dataUrl,
+      blob: file,
+      kind: "video",
+      ...(duration ? { duration } : {}),
+      ...(posterUrl ? { posterUrl } : {}),
+      element,
+    };
+  }
+  return new Promise<SourceImage>((resolve, reject) => {
+    const el = new Image();
+    el.onload = () =>
+      resolve({
+        id: `${file.name}-${generateId()}`,
+        name: file.name,
+        url: dataUrl,
+        dataUrl,
+        blob: file,
+        kind: "image",
+        element: el,
+      });
+    el.onerror = () => reject(new Error(`Não foi possível ler ${file.name}`));
+    el.src = dataUrl;
+  });
+}
+
 export function VideoProjectProvider({ children }: { children: ReactNode }) {
   // Project & DB State
   const [projectId, setProjectId] = useState<string>(() => {
@@ -277,6 +338,109 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
 
   // 3 — Narração
   const [narration, setNarration] = useState<AudioItem | null>(null);
+  const [playingNarrationPreview, setPlayingNarrationPreview] = useState<string | null>(null);
+  const narrationPreviewContextRef = useRef<AudioContext | null>(null);
+  const narrationPreviewSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const narrationPreviewKeyRef = useRef<string | null>(null);
+  const narrationPreviewGenerationRef = useRef(0);
+  const narrationPlayerRef = useRef<HTMLAudioElement | null>(null);
+
+  const releaseNarrationPreviewSource = useCallback(() => {
+    const source = narrationPreviewSourceRef.current;
+    narrationPreviewSourceRef.current = null;
+    if (!source) return;
+    source.onended = null;
+    try {
+      source.stop();
+    } catch {
+      // A fonte pode já ter terminado naturalmente.
+    }
+    source.disconnect();
+  }, []);
+
+  const stopNarrationPreview = useCallback(() => {
+    narrationPreviewGenerationRef.current += 1;
+    releaseNarrationPreviewSource();
+    narrationPreviewKeyRef.current = null;
+    setPlayingNarrationPreview(null);
+  }, [releaseNarrationPreviewSource]);
+
+  const registerNarrationPlayer = useCallback((element: HTMLAudioElement | null) => {
+    narrationPlayerRef.current = element;
+  }, []);
+
+  const playNarrationPreview = useCallback(
+    async (key: string, start: number, end: number) => {
+      const buffer = narration?.buffer;
+      if (!buffer) return;
+
+      if (narrationPreviewKeyRef.current === key) {
+        stopNarrationPreview();
+        return;
+      }
+
+      stopNarrationPreview();
+      narrationPlayerRef.current?.pause();
+
+      const range = normalizeAudioSegment(start, end, buffer.duration);
+      if (!range) return;
+
+      const generation = narrationPreviewGenerationRef.current;
+      try {
+        let audioContext = narrationPreviewContextRef.current;
+        if (!audioContext || audioContext.state === "closed") {
+          const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContextCtor) throw new Error("AudioContext não suportado");
+          audioContext = new AudioContextCtor();
+          narrationPreviewContextRef.current = audioContext;
+        }
+        if (audioContext.state === "suspended") await audioContext.resume();
+        if (generation !== narrationPreviewGenerationRef.current) return;
+
+        const source = audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioContext.destination);
+        narrationPreviewSourceRef.current = source;
+        narrationPreviewKeyRef.current = key;
+        setPlayingNarrationPreview(key);
+
+        source.onended = () => {
+          if (narrationPreviewSourceRef.current !== source) return;
+          narrationPreviewSourceRef.current = null;
+          narrationPreviewKeyRef.current = null;
+          source.disconnect();
+          setPlayingNarrationPreview(null);
+        };
+
+        // Offset e duração vêm do mesmo AudioBuffer analisado pelo VAD. Não há seek
+        // assíncrono nem cronômetro de parede capaz de deslocar o trecho ouvido.
+        source.start(0, range.start, range.duration);
+      } catch (error) {
+        if (generation !== narrationPreviewGenerationRef.current) return;
+        releaseNarrationPreviewSource();
+        narrationPreviewKeyRef.current = null;
+        setPlayingNarrationPreview(null);
+        const detail = error instanceof Error ? error.message : "reprodução indisponível";
+        toast.error(`Não foi possível ouvir este trecho: ${detail}`);
+      }
+    },
+    [narration?.buffer, releaseNarrationPreviewSource, stopNarrationPreview],
+  );
+
+  useEffect(() => {
+    stopNarrationPreview();
+  }, [narration?.buffer, stopNarrationPreview]);
+
+  useEffect(
+    () => () => {
+      narrationPreviewGenerationRef.current += 1;
+      releaseNarrationPreviewSource();
+      const audioContext = narrationPreviewContextRef.current;
+      narrationPreviewContextRef.current = null;
+      if (audioContext && audioContext.state !== "closed") void audioContext.close();
+    },
+    [releaseNarrationPreviewSource],
+  );
 
   // 4 — Legendas
   const [showCaptions, setShowCaptions] = useState(true);
@@ -326,10 +490,33 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   const [thumbSubtitle, setThumbSubtitle] = useState("");
   const [accent, setAccent] = useState(ACCENTS[0]!);
 
+  // 7.1 — Cenas da Narração
+  const [sceneMinPauseSec, setSceneMinPauseSec] = useState(DEFAULT_SCENE_MIN_PAUSE_SEC);
+  const [minSceneDurationSec, setMinSceneDurationSec] = useState(DEFAULT_MIN_SCENE_DURATION_SEC);
+
   /* ── Valores derivados ── */
   const duration = narration?.buffer.duration ?? 0;
   const perImage = images.length ? duration / images.length : 0;
   const effectiveMusicVolume = (duckOnly ? Math.min(musicVolume, 30) : musicVolume) / 100;
+  const analysisMinSilenceSec = Math.min(vadMinSilence, sceneMinPauseSec);
+
+  // Cenas detectadas diretamente das pausas e trechos da narração
+  const detectedScenes = useMemo(() => {
+    if (!narration?.buffer || duration <= 0) return [] as DetectedNarrationScene[];
+    return detectScenesFromAudio(narration.buffer, {
+      minPauseSec: sceneMinPauseSec,
+      minSceneDurationSec,
+      sensitivity: vadSensitivity,
+      minSilenceSec: analysisMinSilenceSec,
+    });
+  }, [
+    narration?.buffer,
+    duration,
+    sceneMinPauseSec,
+    minSceneDurationSec,
+    vadSensitivity,
+    analysisMinSilenceSec,
+  ]);
 
   const { captions: generatedCaptions, pausesCount } = useMemo(() => {
     if (!script.trim() || duration <= 0) {
@@ -338,7 +525,8 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
     if (autoSyncCaptions && narration?.buffer) {
       return buildAudioSyncedCaptions(script, narration.buffer, duration, maxChars, {
         sensitivity: vadSensitivity,
-        minSilenceSec: vadMinSilence,
+        minSilenceSec: analysisMinSilenceSec,
+        sceneRanges: detectedScenes,
       });
     }
     return {
@@ -352,11 +540,50 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
     autoSyncCaptions,
     narration?.buffer,
     vadSensitivity,
-    vadMinSilence,
+    analysisMinSilenceSec,
+    detectedScenes,
   ]);
 
   const captions = customCaptions ?? generatedCaptions;
   const isCustomizedCaptions = customCaptions !== null;
+
+  // Cada cena cobre exatamente o trecho da narração que lhe corresponde, em vez de
+  // fatias fixas de tempo. Assim imagem, fala e legenda trocam juntas.
+  const { scenes, mode: sceneMode } = useMemo(() => {
+    if (duration <= 0) return { scenes: [] as Scene[], mode: "even" as SceneMode };
+    // A narração é a fonte de verdade da grade, inclusive enquanto os slots de
+    // mídia ainda estão sendo preenchidos. Assim a timeline nunca troca
+    // silenciosamente para uma divisão uniforme/balanceada.
+    if (detectedScenes.length > 0) {
+      return {
+        scenes: detectedScenes.map((s) => ({
+          start: s.start,
+          end: s.end,
+          duration: s.duration,
+          speechStart: s.speechStart,
+          speechEnd: s.speechEnd,
+          pauseAfter: s.pauseAfter,
+        })),
+        mode: "audio" as SceneMode,
+      };
+    }
+    if (!images.length) return { scenes: [] as Scene[], mode: "even" as SceneMode };
+
+    const { groups, paragraphCount } = assignCaptionParagraphs(
+      script,
+      generatedCaptions.map((caption) => caption.text),
+    );
+    return buildScenes(
+      captions,
+      images.length,
+      duration,
+      paragraphCount === images.length ? groups : null,
+      null,
+    );
+  }, [script, generatedCaptions, captions, images.length, duration, detectedScenes]);
+  const minSceneDuration = scenes.length
+    ? Math.min(...scenes.map((scene) => scene.duration))
+    : perImage;
 
   const updateCaption = useCallback(
     (index: number, updated: Partial<Caption>) => {
@@ -427,14 +654,28 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   /* ── Carregar imagens e vídeos com DataURL para persistência ── */
   const addImages = useCallback(
     async (files: File[]) => {
-      const picked = files.filter(
+      const compatible = files.filter(
         (file) => file.type.startsWith("image/") || file.type.startsWith("video/"),
       );
-      if (!picked.length) {
+      if (!compatible.length) {
         const message = "Selecione arquivos de imagem ou vídeo válidos.";
         updateFileLoadProgress("images", { status: "error", progress: 0, message });
         toast.error(message);
         return;
+      }
+
+      const availableSlots = detectedScenes.length
+        ? Math.max(0, detectedScenes.length - images.length)
+        : compatible.length;
+      if (availableSlots === 0) {
+        toast.error("Todas as cenas detectadas já possuem mídia.");
+        return;
+      }
+      const picked = compatible.slice(0, availableSlots);
+      if (picked.length < compatible.length) {
+        toast.info(
+          `${compatible.length - picked.length} arquivo(s) excedente(s) não foram adicionados.`,
+        );
       }
 
       updateFileLoadProgress("images", {
@@ -508,12 +749,12 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
         toast.error(message);
       }
     },
-    [updateFileLoadProgress],
+    [detectedScenes.length, images.length, updateFileLoadProgress],
   );
 
   /* ── Manipulação de Imagens (Reordenar e Remover) ── */
   const removeImage = useCallback((id: string) => {
-    setImages((prev) => prev.filter((img) => img.id !== id));
+    setImages((prev) => (prev.at(-1)?.id === id ? prev.slice(0, -1) : prev));
   }, []);
 
   const moveImage = useCallback((index: number, direction: -1 | 1) => {
@@ -539,6 +780,45 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       return copy;
     });
   }, []);
+
+  const replaceImageAt = useCallback(async (index: number, file: File) => {
+    try {
+      const item = await loadSingleMedia(file);
+      setImages((prev) => {
+        const next = [...prev];
+        next[index] = item;
+        return next;
+      });
+      toast.success(`Mídia da Cena ${index + 1} atualizada.`);
+    } catch (err) {
+      toast.error("Falha ao carregar a mídia.");
+    }
+  }, []);
+
+  const setImageForScene = useCallback(
+    async (sceneIndex: number, file: File) => {
+      if (sceneIndex > images.length) {
+        toast.info("Preencha as cenas anteriores antes de adicionar esta mídia.");
+        return;
+      }
+      try {
+        const item = await loadSingleMedia(file);
+        setImages((prev) => {
+          const next = [...prev];
+          if (sceneIndex < next.length) {
+            next[sceneIndex] = item;
+          } else {
+            next.push(item);
+          }
+          return next;
+        });
+        toast.success(`Mídia encaixada na Cena ${sceneIndex + 1}.`);
+      } catch (err) {
+        toast.error("Falha ao carregar a mídia.");
+      }
+    },
+    [images.length],
+  );
 
   /* ── Carregar áudio com DataURL para persistência ── */
   const loadAudio = useCallback(
@@ -902,6 +1182,10 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       reorderImages,
       narration,
       setNarration,
+      playingNarrationPreview,
+      playNarrationPreview,
+      stopNarrationPreview,
+      registerNarrationPlayer,
       music,
       setMusic,
       musicVolume,
@@ -955,9 +1239,19 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       setAccent,
       duration,
       perImage,
+      detectedScenes,
+      sceneMinPauseSec,
+      setSceneMinPauseSec,
+      minSceneDurationSec,
+      setMinSceneDurationSec,
+      scenes,
+      sceneMode,
+      minSceneDuration,
       effectiveMusicVolume,
       fileLoadProgress,
       loadAudio,
+      replaceImageAt,
+      setImageForScene,
     }),
     [
       projectId,
@@ -976,6 +1270,10 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       moveImage,
       reorderImages,
       narration,
+      playingNarrationPreview,
+      playNarrationPreview,
+      stopNarrationPreview,
+      registerNarrationPlayer,
       music,
       musicVolume,
       narrationVolume,
@@ -1007,9 +1305,17 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       accent,
       duration,
       perImage,
+      detectedScenes,
+      sceneMinPauseSec,
+      minSceneDurationSec,
+      scenes,
+      sceneMode,
+      minSceneDuration,
       effectiveMusicVolume,
       fileLoadProgress,
       loadAudio,
+      replaceImageAt,
+      setImageForScene,
     ],
   );
 

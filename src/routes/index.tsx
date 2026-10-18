@@ -42,8 +42,8 @@ function Studio() {
         <div className="mx-auto grid max-w-6xl gap-5 px-5 py-8 lg:grid-cols-[minmax(0,1fr)_360px]">
           <div className="space-y-5">
             <ScriptStep />
-            <ImagesStep />
             <NarrationStep />
+            <ImagesStep />
             <CaptionsStep />
             <MusicStep />
             <RenderStep />

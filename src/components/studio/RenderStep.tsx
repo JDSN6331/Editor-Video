@@ -24,7 +24,11 @@ const MOTION_EFFECTS: Array<{ value: MotionEffect; label: string; detail: string
   { value: "ken-burns", label: "Ken Burns", detail: "Zoom com deslocamento diagonal" },
   { value: "zoom", label: "Zoom suave", detail: "Aproximação central discreta" },
   { value: "pan", label: "Panorâmica", detail: "Movimento horizontal lento" },
-  { value: "dissolve", label: "Dissolução", detail: "Transição gradual entre imagens" },
+  {
+    value: "dissolve",
+    label: "Dissolução",
+    detail: "Fade via preto, sem invadir o trecho da cena vizinha",
+  },
   { value: "zoom-out", label: "Zoom reverso", detail: "Afastamento central suave" },
 ];
 
@@ -39,6 +43,8 @@ export function RenderStep() {
     effectiveMusicVolume,
     narrationVolume,
     perImage,
+    scenes,
+    minSceneDuration,
     duration,
     preset,
     setPreset,
@@ -77,7 +83,13 @@ export function RenderStep() {
     if (!testingEffect || duration <= 0) return;
     const startedAt = performance.now();
     const sampleDuration = 30;
-    const previewSpan = Math.min(duration, Math.max(0.1, perImage * Math.min(3, images.length)));
+    const previewSpan = Math.min(
+      duration,
+      Math.max(
+        0.1,
+        scenes[Math.min(3, scenes.length) - 1]?.end ?? perImage * Math.min(3, images.length),
+      ),
+    );
     const previewFps = Math.max(24, Math.min(60, fps));
     let lastDrawAt = 0;
     let frame = 0;
@@ -96,7 +108,7 @@ export function RenderStep() {
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [duration, fps, images.length, perImage, testingEffect]);
+  }, [duration, fps, images.length, perImage, scenes, testingEffect]);
 
   // O servidor informa o tempo em amostras periódicas. Interpola apenas a exibição
   // entre duas amostras; o progresso e o vídeo final continuam sendo os valores reais.
@@ -143,8 +155,9 @@ export function RenderStep() {
       showCaptions ? captions : null,
       {
         kenBurns,
-        fade: Math.min(0.6, perImage / 4),
+        fade: Math.min(0.6, minSceneDuration / 4),
         motionEffect: testingEffect ?? motionEffect,
+        scenes,
       },
     );
   }, [
@@ -153,7 +166,8 @@ export function RenderStep() {
     images,
     kenBurns,
     motionEffect,
-    perImage,
+    minSceneDuration,
+    scenes,
     preset,
     smoothPreviewTime,
     renderStage,
@@ -166,9 +180,9 @@ export function RenderStep() {
 
   // Validação dos requisitos para renderização
   const hasScript = Boolean(script.trim());
-  const hasImages = images.length > 0;
   const hasNarration = Boolean(narration);
-  const isReadyToRender = hasImages && hasNarration;
+  const hasExactSceneMedia = scenes.length > 0 && images.length === scenes.length;
+  const isReadyToRender = hasNarration && hasExactSceneMedia;
   const readyImageCount = images.filter((media) =>
     media.kind === "video"
       ? media.element instanceof HTMLVideoElement && media.element.videoWidth > 0
@@ -178,7 +192,7 @@ export function RenderStep() {
   ).length;
 
   const handleRender = async () => {
-    if (!narration || !images.length) return;
+    if (!narration || !hasExactSceneMedia) return;
     setError(null);
     setResult(null);
     setProgress(0);
@@ -205,7 +219,8 @@ export function RenderStep() {
         duration,
         kenBurns,
         motionEffect,
-        fade: Math.min(0.6, perImage / 4),
+        fade: Math.min(0.6, minSceneDuration / 4),
+        scenes: scenes.map(({ start, end }) => ({ start, end })),
         format: preferredFormat,
         onProgress: (value, stage, detail, timeSec) => {
           setRenderStage(stage);
@@ -269,21 +284,6 @@ export function RenderStep() {
 
             <div
               className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 ${
-                hasImages
-                  ? "border-primary/30 bg-primary/10 text-primary"
-                  : "border-border bg-background/50 text-muted-foreground"
-              }`}
-            >
-              {hasImages ? (
-                <CheckCircle2 className="size-3.5 text-primary shrink-0" />
-              ) : (
-                <span className="size-1.5 rounded-full bg-amber-500 shrink-0" />
-              )}
-              <span>Etapa 2: Pelo menos 1 imagem ou vídeo</span>
-            </div>
-
-            <div
-              className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 ${
                 hasNarration
                   ? "border-primary/30 bg-primary/10 text-primary"
                   : "border-border bg-background/50 text-muted-foreground"
@@ -294,7 +294,24 @@ export function RenderStep() {
               ) : (
                 <span className="size-1.5 rounded-full bg-amber-500 shrink-0" />
               )}
-              <span>Etapa 3: Narração (áudio)</span>
+              <span>Etapa 2: Narração (áudio e definição de cenas)</span>
+            </div>
+
+            <div
+              className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 ${
+                hasExactSceneMedia
+                  ? "border-primary/30 bg-primary/10 text-primary"
+                  : "border-border bg-background/50 text-muted-foreground"
+              }`}
+            >
+              {hasExactSceneMedia ? (
+                <CheckCircle2 className="size-3.5 text-primary shrink-0" />
+              ) : (
+                <span className="size-1.5 rounded-full bg-amber-500 shrink-0" />
+              )}
+              <span>
+                Etapa 3: {images.length} de {scenes.length} cenas com mídia
+              </span>
             </div>
           </div>
         </div>
