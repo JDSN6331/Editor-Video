@@ -1,5 +1,6 @@
 import type { Caption, MotionEffect } from "./types";
 import { generateId } from "../uuid";
+import { clampVideoTrimStart } from "./scenes";
 
 /**
  * Cliente da montagem de vídeo no servidor.
@@ -17,6 +18,10 @@ interface ServerRenderOptions {
     url: string;
     blob?: Blob;
     kind: "image" | "video";
+    /** Duração original do vídeo, quando conhecida pelo navegador. */
+    duration?: number | undefined;
+    /** Início do corte (s) de um vídeo; ignorado para imagens. */
+    trimStart?: number | undefined;
   }>;
   narration: { name: string; dataUrl?: string; url: string; blob?: Blob };
   music?: { name: string; dataUrl?: string; url: string; blob?: Blob } | null;
@@ -315,7 +320,7 @@ export async function renderVideoOnServer(
     const totalWeight = weights.reduce((sum, value) => sum + value, 0);
     let completedWeight = 0;
     const uploaded: {
-      media: Array<{ kind: "image" | "video"; fileName: string }>;
+      media: Array<{ kind: "image" | "video"; fileName: string; trimStart: number }>;
       narration: string;
       music: string | null;
     } = {
@@ -345,7 +350,19 @@ export async function renderVideoOnServer(
       );
       completedWeight += weight;
       if (asset.kind === "image" || asset.kind === "video") {
-        uploaded.media.push({ kind: asset.kind, fileName });
+        const source = options.images[asset.index];
+        const scene = options.scenes?.[asset.index];
+        const sceneDuration = scene
+          ? Math.max(0, scene.end - scene.start)
+          : options.duration / Math.max(1, options.images.length);
+        uploaded.media.push({
+          kind: asset.kind,
+          fileName,
+          trimStart:
+            asset.kind === "video"
+              ? clampVideoTrimStart(source?.duration ?? 0, sceneDuration, source?.trimStart ?? 0)
+              : 0,
+        });
       } else if (asset.kind === "narration") uploaded.narration = fileName;
       else uploaded.music = fileName;
     }

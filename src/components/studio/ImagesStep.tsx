@@ -22,6 +22,7 @@ import { useVideoProject } from "@/contexts/VideoProjectContext";
 import { FileLoadIndicator } from "./FileLoadIndicator";
 import { formatTime } from "@/lib/video/captions";
 import { getSceneScriptText } from "@/lib/video/scenes";
+import { isFilledMedia } from "@/lib/video/types";
 import { toast } from "sonner";
 
 export function ImagesStep() {
@@ -107,9 +108,10 @@ export function ImagesStep() {
   const hasNarration = Boolean(narration);
   const totalSlots =
     hasNarration && detectedScenes.length > 0 ? detectedScenes.length : images.length;
-  const filledSlotsCount = Math.min(images.length, totalSlots);
-  const extraMediaCount = Math.max(0, images.length - totalSlots);
-  const isAllFilled = totalSlots > 0 && images.length === totalSlots;
+  const filledSlotsCount = images.slice(0, totalSlots).filter(isFilledMedia).length;
+  const totalFilledMedia = images.filter(isFilledMedia).length;
+  const extraMediaCount = images.slice(totalSlots).filter(isFilledMedia).length;
+  const isAllFilled = totalSlots > 0 && filledSlotsCount === totalSlots;
 
   const copyAllScenePrompts = () => {
     if (totalSlots === 0) return;
@@ -136,9 +138,9 @@ export function ImagesStep() {
           ? "Cada cena mostra o trecho da narração e a duração exata para você escolher a melhor imagem ou vídeo."
           : "Carregue a narração na Etapa 2 para gerar os trechos exatos de cada cena, ou adicione mídias livremente."
       }
-      done={images.length > 0 && (!hasNarration || isAllFilled)}
+      done={totalFilledMedia > 0 && (!hasNarration || isAllFilled)}
       aside={
-        images.length > 0 ? (
+        totalFilledMedia > 0 ? (
           <Button variant="ghost" size="sm" onClick={() => setImages([])}>
             <Trash2 className="size-4" /> limpar todas
           </Button>
@@ -234,14 +236,15 @@ export function ImagesStep() {
                 ? "Grade de cenas (veja o trecho da fala e encaixe a imagem/vídeo ideal):"
                 : "Mídias carregadas (arraste para reordenar):"}
             </span>
-            {images.length > 0 && (
-              <span className="text-[11px] font-mono">{images.length} mídia(s) no projeto</span>
+            {totalFilledMedia > 0 && (
+              <span className="text-[11px] font-mono">{totalFilledMedia} mídia(s) no projeto</span>
             )}
           </div>
 
           <ul className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {Array.from({ length: totalSlots }, (_, i) => {
-              const img = images[i];
+              const slot = images[i];
+              const img = isFilledMedia(slot) ? slot : undefined;
               const sceneTiming = detectedScenes[i] ?? scenes[i];
               const startTime = sceneTiming?.start ?? i * perImage;
               const endTime = sceneTiming?.end ?? (i + 1) * perImage;
@@ -249,7 +252,7 @@ export function ImagesStep() {
               const speechEnd = sceneTiming?.speechEnd ?? endTime;
               const durationSec = sceneTiming?.duration ?? perImage;
               const isFilled = Boolean(img);
-              const canFillSlot = isFilled || i === images.length;
+              const canFillSlot = Boolean(slot?.isPlaceholder) || i === images.length;
               const sceneText = getSceneScriptText(
                 captions,
                 speechStart,
@@ -399,15 +402,16 @@ export function ImagesStep() {
 
                       {/* Botão de excluir */}
                       <button
-                        onClick={() => removeImage(img.id)}
-                        disabled={i !== images.length - 1}
-                        className="absolute right-1.5 top-1.5 rounded-full bg-destructive/90 p-1 text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100 shadow disabled:cursor-not-allowed disabled:opacity-30"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          removeImage(img.id);
+                          toast.success(
+                            `Mídia removida da Cena ${i + 1}. A posição da cena foi mantida.`,
+                          );
+                        }}
+                        className="absolute right-1.5 top-1.5 rounded-full bg-destructive/90 p-1 text-destructive-foreground opacity-100 shadow transition-opacity hover:bg-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
                         aria-label={`Remover ${img.name}`}
-                        title={
-                          i === images.length - 1
-                            ? "Remover mídia desta cena"
-                            : "Troque esta mídia ou remova primeiro as cenas seguintes"
-                        }
+                        title="Remover mídia desta cena"
                       >
                         <X className="size-3" />
                       </button>
@@ -462,7 +466,11 @@ export function ImagesStep() {
                         <Plus className="size-4" />
                       </div>
                       <span className="text-[11px] font-medium text-foreground">
-                        {canFillSlot ? "Encaixar mídia aqui" : "Preencha a cena anterior"}
+                        {slot?.isPlaceholder
+                          ? "Cena mantida — inserir nova mídia"
+                          : canFillSlot
+                            ? "Encaixar mídia aqui"
+                            : "Preencha a cena anterior"}
                       </span>
                       <span className="text-[10px] text-muted-foreground mt-0.5">
                         Ficará em tela por {durationSec.toFixed(1)}s
@@ -477,7 +485,11 @@ export function ImagesStep() {
                         {img.name}
                       </span>
                     ) : (
-                      <span className="italic opacity-70">Aguardando mídia...</span>
+                      <span className="italic opacity-70">
+                        {slot?.isPlaceholder
+                          ? "Mídia removida — card preservado"
+                          : "Aguardando mídia..."}
+                      </span>
                     )}
                   </div>
 

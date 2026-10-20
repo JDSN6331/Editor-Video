@@ -11,6 +11,7 @@ import {
   getGoogleDriveUploadState,
   cancelGoogleDriveUpload,
 } from "./render-service";
+import { transcribeAudioBytes } from "./transcription-service";
 
 const ALLOWED_FRONTEND_ORIGINS = new Set([
   "https://www.editorvideo.duquelabs.com.br",
@@ -47,7 +48,11 @@ export async function handleNodeApi(req: IncomingMessage, res: ServerResponse): 
   const pathname = url.pathname.replace(/\/+$/, "");
   const method = (req.method || "GET").toUpperCase();
 
-  if (!pathname.startsWith("/api/transcode") && !pathname.startsWith("/api/render")) {
+  if (
+    !pathname.startsWith("/api/transcode") &&
+    !pathname.startsWith("/api/render") &&
+    !pathname.startsWith("/api/transcribe")
+  ) {
     return false;
   }
 
@@ -84,6 +89,33 @@ export async function handleNodeApi(req: IncomingMessage, res: ServerResponse): 
       res.setHeader("Content-Type", "application/json");
       res.setHeader("Cache-Control", "no-store");
       res.end(body);
+      return true;
+    }
+
+    if (pathname === "/api/transcribe" && method === "POST") {
+      const maxBytes = 25 * 1024 * 1024;
+      const chunks: Buffer[] = [];
+      let total = 0;
+      for await (const chunk of req) {
+        const buffer = chunk as Buffer;
+        total += buffer.length;
+        if (total > maxBytes) {
+          const tooLarge = Object.assign(new Error("A narração ultrapassa o limite de 25 MB."), {
+            status: 413,
+          });
+          throw tooLarge;
+        }
+        chunks.push(buffer);
+      }
+      const result = await transcribeAudioBytes(
+        Buffer.concat(chunks),
+        url.searchParams.get("name") || "narracao.mp3",
+        String(req.headers["content-type"] || "application/octet-stream"),
+      );
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Cache-Control", "no-store");
+      res.end(JSON.stringify(result));
       return true;
     }
 
@@ -211,7 +243,7 @@ export async function handleNodeApi(req: IncomingMessage, res: ServerResponse): 
     }
     console.error("[node-api-error]", error);
     if (!res.headersSent) {
-      res.statusCode = 500;
+      res.statusCode = statusError.status || 500;
       res.setHeader("Content-Type", "application/json");
     }
     res.end(

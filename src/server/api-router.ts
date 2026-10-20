@@ -9,6 +9,7 @@ import {
   handleFetchRenderResult,
   handleFetchRenderUpload,
 } from "./render-service";
+import { handleFetchTranscription } from "./transcription-service";
 
 const CORS_PREFLIGHT_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -18,7 +19,11 @@ const CORS_PREFLIGHT_HEADERS = {
 };
 
 export function isApiPath(pathname: string): boolean {
-  return pathname.startsWith("/api/transcode") || pathname.startsWith("/api/render");
+  return (
+    pathname.startsWith("/api/transcode") ||
+    pathname.startsWith("/api/render") ||
+    pathname.startsWith("/api/transcribe")
+  );
 }
 
 /**
@@ -50,6 +55,9 @@ export async function handleApiRequest(request: Request): Promise<Response | nul
   }
   if (pathname === "/api/transcode" && method === "POST") {
     return handleFetchTranscode(request);
+  }
+  if (pathname === "/api/transcribe" && method === "POST") {
+    return handleFetchTranscription(request);
   }
   if (pathname === "/api/render/upload" && method === "POST") {
     return handleFetchRenderUpload(request);

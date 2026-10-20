@@ -339,6 +339,164 @@ export function sceneIndexAt(scenes: Array<{ start: number; end: number }>, time
   return low;
 }
 
+/** Menor duração permitida para uma cena editada manualmente. */
+export const MIN_MANUAL_SCENE_SEC = 0.5;
+
+const roundMs = (value: number) => Math.round(value * 1000) / 1000;
+
+/**
+ * Constrói cenas contíguas a partir dos pontos de corte internos. Como cada cena
+ * termina exatamente onde a seguinte começa, nenhuma mídia consegue invadir o
+ * trecho vizinho.
+ */
+export function scenesFromCuts(
+  cuts: readonly number[],
+  duration: number,
+): DetectedNarrationScene[] {
+  if (!Number.isFinite(duration) || duration <= 0) return [];
+  const bounds = [0, ...cuts.map(roundMs), roundMs(duration)];
+  const scenes: DetectedNarrationScene[] = [];
+  for (let index = 0; index < bounds.length - 1; index += 1) {
+    const start = bounds[index]!;
+    const end = bounds[index + 1]!;
+    scenes.push({
+      index,
+      start,
+      end,
+      duration: roundMs(Math.max(0.001, end - start)),
+      speechStart: start,
+      speechEnd: end,
+      pauseAfter: 0,
+    });
+  }
+  return scenes;
+}
+
+/** Pontos de corte internos (fim de cada cena, exceto a última). */
+export function cutsFromScenes(scenes: ReadonlyArray<{ end: number }>): number[] {
+  return scenes.slice(0, -1).map((scene) => scene.end);
+}
+
+/** Valida cortes vindos de fora (projeto salvo): ordenados e respeitando a duração mínima. */
+export function areValidCuts(
+  cuts: readonly number[],
+  duration: number,
+  minLen = MIN_MANUAL_SCENE_SEC,
+): boolean {
+  let previous = 0;
+  for (const cut of cuts) {
+    if (!Number.isFinite(cut) || cut - previous < minLen - 1e-6) return false;
+    previous = cut;
+  }
+  return duration - previous >= minLen - 1e-6;
+}
+
+/** Limita um corte entre os vizinhos, mantendo a duração mínima das duas cenas. */
+export function clampCut(
+  cuts: readonly number[],
+  index: number,
+  time: number,
+  duration: number,
+  minLen = MIN_MANUAL_SCENE_SEC,
+): number {
+  const lower = (index === 0 ? 0 : cuts[index - 1]!) + minLen;
+  const upper = (index === cuts.length - 1 ? duration : cuts[index + 1]!) - minLen;
+  if (upper < lower) return cuts[index]!;
+  return roundMs(Math.min(upper, Math.max(lower, time)));
+}
+
+/** Move um corte; devolve novos cortes (nunca altera a quantidade de cenas). */
+export function moveCut(
+  cuts: readonly number[],
+  index: number,
+  time: number,
+  duration: number,
+  minLen = MIN_MANUAL_SCENE_SEC,
+): number[] {
+  if (index < 0 || index >= cuts.length) return [...cuts];
+  const next = [...cuts];
+  next[index] = clampCut(cuts, index, time, duration, minLen);
+  return next;
+}
+
+/** Divide a cena que contém `time`. Retorna null se alguma metade ficar curta demais. */
+export function splitCutsAt(
+  cuts: readonly number[],
+  time: number,
+  duration: number,
+  minLen = MIN_MANUAL_SCENE_SEC,
+): { cuts: number[]; sceneIndex: number } | null {
+  const scenes = scenesFromCuts(cuts, duration);
+  if (!scenes.length) return null;
+  const sceneIndex = sceneIndexAt(scenes, time);
+  const scene = scenes[sceneIndex]!;
+  if (time - scene.start < minLen || scene.end - time < minLen) return null;
+  const next = [...cuts];
+  next.splice(sceneIndex, 0, roundMs(time));
+  return { cuts: next, sceneIndex };
+}
+
+/** Funde a cena `index` com a seguinte (remove o corte entre elas). */
+export function mergeCutsAt(cuts: readonly number[], index: number): number[] | null {
+  if (index < 0 || index >= cuts.length) return null;
+  const next = [...cuts];
+  next.splice(index, 1);
+  return next;
+}
+
+/** Ímã: devolve o candidato mais próximo dentro do limite, ou o próprio tempo. */
+export function snapTime(time: number, candidates: readonly number[], threshold: number): number {
+  let best = time;
+  let bestDistance = threshold;
+  for (const candidate of candidates) {
+    const distance = Math.abs(candidate - time);
+    if (distance <= bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/**
+ * Limita o ponto de entrada de um vídeo ao trecho que ainda cabe inteiro na cena.
+ *
+ * Em um clipe de 15 s usado por uma cena de 10 s, por exemplo, a entrada pode
+ * ficar entre 0 e 5 s. Isso mantém a saída sempre dentro do arquivo original e
+ * evita um loop acidental causado por um ponto de entrada tarde demais.
+ */
+export function clampVideoTrimStart(
+  sourceDuration: number,
+  sceneDuration: number,
+  trimStart: number,
+): number {
+  if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) return 0;
+  const safeSceneDuration = Number.isFinite(sceneDuration) ? Math.max(0, sceneDuration) : 0;
+  const maxStart = Math.max(0, sourceDuration - safeSceneDuration);
+  const safeStart = Number.isFinite(trimStart) ? trimStart : 0;
+  return Math.max(0, Math.min(maxStart, safeStart));
+}
+
+/**
+ * Segundo do vídeo-fonte exibido no instante `local` de uma cena. Reproduz o que o
+ * servidor faz: o vídeo começa em `trimStart`, o que passar do fim da cena é
+ * cortado e, se o clipe for mais curto, ele recomeça em `trimStart` (loop).
+ */
+export function videoSourceTime(
+  sourceDuration: number,
+  trimStart: number,
+  local: number,
+  sceneDuration?: number,
+): number {
+  if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) return 0;
+  const start =
+    sceneDuration === undefined
+      ? Math.max(0, Math.min(trimStart, Math.max(0, sourceDuration - 0.1)))
+      : clampVideoTrimStart(sourceDuration, sceneDuration, trimStart);
+  const span = Math.max(0.1, sourceDuration - start);
+  return Math.min(Math.max(0, sourceDuration - 0.05), start + (Math.max(0, local) % span));
+}
+
 /** Quebra o roteiro em frases completas respeitando a pontuação final (. ! ? …). */
 export function splitFullSentences(script: string): string[] {
   return script

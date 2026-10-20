@@ -16,7 +16,7 @@ import { useVideoProject } from "@/contexts/VideoProjectContext";
 import { formatTime } from "@/lib/video/captions";
 import { renderVideoOnServer, buildDownloadUrl } from "@/lib/video/server-render";
 import { drawFrame } from "@/lib/video/draw";
-import { VIDEO_PRESETS, type MotionEffect, type PresetKey } from "@/lib/video/types";
+import { isFilledMedia, VIDEO_PRESETS, type MotionEffect, type PresetKey } from "@/lib/video/types";
 import { GoogleDriveUpload } from "./GoogleDriveUpload";
 
 const MOTION_EFFECTS: Array<{ value: MotionEffect; label: string; detail: string }> = [
@@ -158,6 +158,7 @@ export function RenderStep() {
         fade: Math.min(0.6, minSceneDuration / 4),
         motionEffect: testingEffect ?? motionEffect,
         scenes,
+        trimStarts: images.map((image) => image.trimStart),
       },
     );
   }, [
@@ -181,14 +182,18 @@ export function RenderStep() {
   // Validação dos requisitos para renderização
   const hasScript = Boolean(script.trim());
   const hasNarration = Boolean(narration);
-  const hasExactSceneMedia = scenes.length > 0 && images.length === scenes.length;
+  const filledMediaCount = images.filter(isFilledMedia).length;
+  const hasExactSceneMedia =
+    scenes.length > 0 && images.length === scenes.length && filledMediaCount === scenes.length;
   const isReadyToRender = hasNarration && hasExactSceneMedia;
-  const readyImageCount = images.filter((media) =>
-    media.kind === "video"
-      ? media.element instanceof HTMLVideoElement && media.element.videoWidth > 0
-      : media.element instanceof HTMLImageElement &&
-        media.element.complete &&
-        media.element.naturalWidth > 0,
+  const readyImageCount = images.filter(
+    (media) =>
+      isFilledMedia(media) &&
+      (media.kind === "video"
+        ? media.element instanceof HTMLVideoElement && media.element.videoWidth > 0
+        : media.element instanceof HTMLImageElement &&
+          media.element.complete &&
+          media.element.naturalWidth > 0),
   ).length;
 
   const handleRender = async () => {
@@ -310,7 +315,7 @@ export function RenderStep() {
                 <span className="size-1.5 rounded-full bg-amber-500 shrink-0" />
               )}
               <span>
-                Etapa 3: {images.length} de {scenes.length} cenas com mídia
+                Etapa 3: {filledMediaCount} de {scenes.length} cenas com mídia
               </span>
             </div>
           </div>
@@ -321,7 +326,7 @@ export function RenderStep() {
       {isReadyToRender && (
         <div className="mb-5 grid gap-2 rounded-xl border border-primary/30 bg-primary/10 p-4 text-xs sm:grid-cols-3">
           <span>
-            <strong>{readyImageCount}</strong> de <strong>{images.length}</strong> mídias prontas
+            <strong>{readyImageCount}</strong> de <strong>{filledMediaCount}</strong> mídias prontas
           </span>
           <span>
             Narração: <strong>{formatTime(duration, true)}</strong>
@@ -443,7 +448,7 @@ export function RenderStep() {
                       setEffectTestTime(0);
                       setTestingEffect(effect.value);
                     }}
-                    disabled={!images.length || rendering}
+                    disabled={!filledMediaCount || rendering}
                     className="mt-2 text-[10px] font-semibold text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {testing ? "Parar preview" : "Testar no preview"}

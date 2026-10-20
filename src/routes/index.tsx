@@ -39,20 +39,22 @@ function Studio() {
       <main className="studio-background min-h-screen bg-transparent">
         <StudioHeader />
 
-        <div className="mx-auto grid max-w-6xl gap-5 px-5 py-8 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="mx-auto grid max-w-[1500px] gap-5 px-5 py-8 xl:grid-cols-[minmax(0,1fr)_300px]">
           <div className="space-y-5">
             <ScriptStep />
             <NarrationStep />
             <ImagesStep />
+            <TimelineSidebar />
             <CaptionsStep />
             <MusicStep />
             <RenderStep />
             <ThumbnailStep />
           </div>
 
-          <aside className="space-y-5 lg:self-start">
-            <TimelineSidebar />
-            <AboutSidebar />
+          <aside className="space-y-5 xl:self-start">
+            <div className="studio-resources-panel">
+              <AboutSidebar />
+            </div>
           </aside>
         </div>
       </main>

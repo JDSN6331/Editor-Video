@@ -62,6 +62,21 @@ let alignScriptToScenes: (
   }>,
 ) => string[];
 let formatTime: (seconds: number, ms?: boolean) => string;
+let clampVideoTrimStart: (
+  sourceDuration: number,
+  sceneDuration: number,
+  trimStart: number,
+) => number;
+let videoSourceTime: (
+  sourceDuration: number,
+  trimStart: number,
+  local: number,
+  sceneDuration?: number,
+) => number;
+let fillEmptyMediaSlotsInOrder: <T extends { isPlaceholder?: boolean }>(
+  slots: readonly T[],
+  media: readonly T[],
+) => T[];
 let buildSceneFramePlan: (
   scenes: Array<{ start: number; end: number }> | null,
   mediaCount: number,
@@ -75,15 +90,15 @@ before(async () => {
     logLevel: "silent",
     server: { middlewareMode: true },
   });
-  ({ detectScenesFromAudio, getSceneScriptText } = await vite.ssrLoadModule(
-    "/src/lib/video/scenes.ts",
-  ));
+  ({ detectScenesFromAudio, getSceneScriptText, clampVideoTrimStart, videoSourceTime } =
+    await vite.ssrLoadModule("/src/lib/video/scenes.ts"));
   ({ buildAudioSyncedCaptions, alignScriptToScenes } = await vite.ssrLoadModule(
     "/src/lib/video/audioSync.ts",
   ));
   ({ normalizeAudioSegment } = await vite.ssrLoadModule("/src/lib/video/audio.ts"));
   ({ formatTime } = await vite.ssrLoadModule("/src/lib/video/captions.ts"));
   ({ buildSceneFramePlan } = await vite.ssrLoadModule("/src/lib/video/sceneFrames.ts"));
+  ({ fillEmptyMediaSlotsInOrder } = await vite.ssrLoadModule("/src/lib/video/types.ts"));
 });
 
 after(async () => {
@@ -267,6 +282,46 @@ test("normaliza o arredondamento do relógio ao completar um segundo", () => {
   assert.equal(formatTime(9.9996, true), "00:10,000");
   assert.equal(formatTime(59.9996, true), "01:00,000");
   assert.equal(formatTime(Number.NaN, true), "00:00,000");
+});
+
+test("limita o ponto de entrada ao trecho de vídeo que cabe inteiro na cena", () => {
+  assert.equal(clampVideoTrimStart(15, 10, 8), 5);
+  assert.equal(clampVideoTrimStart(15, 10, -2), 0);
+  assert.equal(clampVideoTrimStart(8, 10, 3), 0);
+  assert.equal(clampVideoTrimStart(Number.NaN, 10, 3), 0);
+
+  // Mesmo que um projeto antigo tenha salvo 14 s, uma cena de 10 s usa no
+  // máximo 5 s como entrada e termina no fim real do clipe (15 s).
+  assert.equal(videoSourceTime(15, 14, 9.9, 10), 14.9);
+});
+
+test("preenche um card excluído sem deslocar as cenas seguintes", () => {
+  const slots = [
+    { name: "Cena 7" },
+    { name: "Cena 8 vazia", isPlaceholder: true },
+    { name: "Cena 9" },
+    { name: "Cena 10" },
+  ];
+  const result = fillEmptyMediaSlotsInOrder(slots, [{ name: "Nova Cena 8" }]);
+
+  assert.deepEqual(
+    result.map((item) => item.name),
+    ["Cena 7", "Nova Cena 8", "Cena 9", "Cena 10"],
+  );
+  assert.equal(slots[1]!.isPlaceholder, true);
+});
+
+test("mantém a mídia individual antes de todas as mídias adicionadas no lote seguinte", () => {
+  const individual = { name: "individual" };
+  const batch = [{ name: "lote-1" }, { name: "lote-2" }, { name: "lote-3" }];
+
+  const afterIndividual = fillEmptyMediaSlotsInOrder([], [individual]);
+  const afterBatch = fillEmptyMediaSlotsInOrder(afterIndividual, batch);
+
+  assert.deepEqual(
+    afterBatch.map((item) => item.name),
+    ["individual", "lote-1", "lote-2", "lote-3"],
+  );
 });
 
 test("limita cada mídia ao fim declarado da respectiva cena", () => {

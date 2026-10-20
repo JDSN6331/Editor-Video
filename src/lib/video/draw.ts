@@ -1,5 +1,5 @@
 import type { Caption, MotionEffect } from "./types";
-import { sceneIndexAt } from "./scenes";
+import { sceneIndexAt, videoSourceTime } from "./scenes";
 
 /** Desenha a imagem cobrindo todo o quadro (crop central) com zoom opcional. */
 export function drawCover(
@@ -160,6 +160,8 @@ export function drawFrame(
     motionEffect?: MotionEffect | undefined;
     /** Intervalo exato de cada mídia; sem isso o tempo é dividido igualmente. */
     scenes?: Array<{ start: number; end: number }>;
+    /** Início do corte de cada mídia de vídeo (mesma ordem de `images`). */
+    trimStarts?: Array<number | undefined>;
   } = {
     kenBurns: true,
     fade: 0.6,
@@ -181,6 +183,12 @@ export function drawFrame(
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, w, h);
 
+  // Falha de forma segura caso uma grade externa traga uma lacuna. A busca por
+  // índice usa o início da cena; sem esta verificação, a mídia anterior poderia
+  // continuar visível até o próximo início mesmo depois do próprio fim.
+  const isLastFrame = index === images.length - 1 && Math.abs(safeTime - duration) < 0.001;
+  if (safeTime < sceneStart || (safeTime >= sceneEnd && !isLastFrame)) return;
+
   const easedProgress = progress * progress * (3 - 2 * progress);
   const effect = options.motionEffect ?? (options.kenBurns ? "ken-burns" : "dissolve");
   const zoom =
@@ -197,11 +205,36 @@ export function drawFrame(
     effect === "ken-burns" ? 0.2 + 0.6 * easedProgress : effect === "pan" ? progress : 0.5;
   const verticalPosition = effect === "ken-burns" ? 0.3 + 0.4 * easedProgress : 0.5;
   const current = images[index];
+  // Vídeos precisam estar no quadro correto antes de serem desenhados. Se o seek
+  // ainda não completou, o canvas fica em preto (já preenchido acima) em vez de
+  // exibir o quadro da cena anterior — esse era o vazamento visual.
+  let mediaReady = true;
   if (current instanceof HTMLVideoElement && Number.isFinite(current.duration)) {
-    const target = Math.min(Math.max(0, current.duration - 0.05), local % current.duration);
-    if (Math.abs(current.currentTime - target) > 0.12) current.currentTime = target;
+    const target = videoSourceTime(
+      current.duration,
+      options.trimStarts?.[index] ?? 0,
+      local,
+      perImage,
+    );
+    // Tolerância apertada: ~1 quadro a 30 fps. O threshold anterior (120ms ≈ 3–4
+    // frames) permitia desvios grandes demais; agora o seek é disparado com muito
+    // mais frequência e o frame exibido é sempre o correto.
+    const frameThreshold = 0.04;
+    const drift = Math.abs(current.currentTime - target);
+    if (drift > frameThreshold) {
+      current.currentTime = target;
+      // O seek é assíncrono: o quadro exibido ainda é o antigo. Marcar como "não
+      // pronto" impede que o canvas desenhe o frame da cena anterior na transição.
+      mediaReady = false;
+    } else if (current.seeking || current.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      // O navegador ainda está decodificando o quadro ou posicionando; desenhar
+      // agora mostraria um frame obsoleto.
+      mediaReady = false;
+    }
   }
-  if (current) drawCover(ctx, current, w, h, zoom, 1, horizontalPosition, verticalPosition);
+  if (current && mediaReady) {
+    drawCover(ctx, current, w, h, zoom, 1, horizontalPosition, verticalPosition);
+  }
 
   // O fade passa pelo preto dentro do próprio intervalo. Uma mídia nunca aparece
   // antes do início da cena dela, inclusive no preview.

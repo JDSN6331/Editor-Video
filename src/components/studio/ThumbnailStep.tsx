@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Download } from "lucide-react";
 import { StepCard } from "./StepCard";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { useVideoProject, ACCENTS } from "@/contexts/VideoProjectContext";
 import { drawThumbnail } from "@/lib/video/thumbnail";
 import { downloadBlob } from "@/lib/utils";
 import { toast } from "sonner";
+import { isFilledMedia } from "@/lib/video/types";
 
 type NativeSaveFileHandle = {
   createWritable: () => Promise<{
@@ -41,11 +42,24 @@ export function ThumbnailStep() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [thumbnailReady, setThumbnailReady] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const thumbnailMedia = useMemo(() => images.filter(isFilledMedia), [images]);
+
+  useEffect(() => {
+    if (!thumbnailMedia.length) {
+      setThumbnailReady(false);
+      if (thumbIndex !== 0) setThumbIndex(0);
+      return;
+    }
+    if (thumbIndex >= thumbnailMedia.length) setThumbIndex(thumbnailMedia.length - 1);
+  }, [setThumbIndex, thumbIndex, thumbnailMedia.length]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const img = images[thumbIndex];
-    if (!canvas || !img) return;
+    const img = thumbnailMedia[thumbIndex];
+    if (!canvas || !img) {
+      setThumbnailReady(false);
+      return;
+    }
     drawThumbnail(canvas, {
       image: img.element,
       title: thumbTitle,
@@ -54,10 +68,10 @@ export function ThumbnailStep() {
     });
 
     setThumbnailReady(true);
-  }, [images, thumbIndex, thumbTitle, thumbSubtitle, accent]);
+  }, [thumbnailMedia, thumbIndex, thumbTitle, thumbSubtitle, accent]);
 
   const handleDownload = async () => {
-    const image = images[thumbIndex];
+    const image = thumbnailMedia[thumbIndex];
     if (!image || isDownloading) return;
     setIsDownloading(true);
     try {
@@ -142,9 +156,9 @@ export function ThumbnailStep() {
       index={7}
       title="Thumbnail"
       description="1280×720 com a legenda em destaque, pronta para subir junto do vídeo."
-      done={!!images.length && !!thumbTitle}
+      done={thumbnailMedia.length > 0 && !!thumbTitle}
     >
-      {images.length === 0 ? (
+      {thumbnailMedia.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           Carregue uma imagem ou vídeo para criar a capa.
         </p>
@@ -192,7 +206,7 @@ export function ThumbnailStep() {
             <div className="flex min-w-0 items-start gap-3">
               <span className="mt-2 shrink-0 text-xs text-muted-foreground">Imagem:</span>
               <div className="flex min-w-0 flex-1 flex-wrap gap-1">
-                {images.map((img, i) => (
+                {thumbnailMedia.map((img, i) => (
                   <button
                     type="button"
                     key={img.id}

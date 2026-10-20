@@ -8,16 +8,33 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { Caption, MotionEffect, PresetKey, SourceImage } from "@/lib/video/types";
+import {
+  fillEmptyMediaSlotsInOrder,
+  isFilledMedia,
+  type Caption,
+  type CaptionWord,
+  type MotionEffect,
+  type PresetKey,
+  type SourceImage,
+} from "@/lib/video/types";
 import { buildCaptions } from "@/lib/video/captions";
 import { buildAudioSyncedCaptions } from "@/lib/video/audioSync";
+import { captionsFromTranscription, transcribeAudio } from "@/lib/video/transcription";
 import { decodeAudio, normalizeAudioSegment } from "@/lib/video/audio";
 import {
+  areValidCuts,
   assignCaptionParagraphs,
   buildScenes,
+  clampVideoTrimStart,
+  cutsFromScenes,
   DEFAULT_MIN_SCENE_DURATION_SEC,
   DEFAULT_SCENE_MIN_PAUSE_SEC,
   detectScenesFromAudio,
+  MIN_MANUAL_SCENE_SEC,
+  mergeCutsAt,
+  moveCut,
+  scenesFromCuts,
+  splitCutsAt,
   type DetectedNarrationScene,
   type Scene,
   type SceneMode,
@@ -102,6 +119,11 @@ interface VideoProjectContextType {
   vadMinSilence: number;
   setVadMinSilence: (value: number) => void;
   pausesCount: number;
+  transcriptionStatus: "idle" | "transcribing" | "ready" | "error";
+  transcriptionError: string | null;
+  transcriptionText: string;
+  hasAudioTranscription: boolean;
+  transcribeNarration: () => Promise<void>;
   isCustomizedCaptions: boolean;
   updateCaption: (index: number, updated: Partial<Caption>) => void;
   resetCaptionsToAuto: () => void;
@@ -121,6 +143,9 @@ interface VideoProjectContextType {
   // Timeline preview
   previewTime: number;
   setPreviewTime: React.Dispatch<React.SetStateAction<number>>;
+  /** Reprodução do preview (compartilhada entre a barra lateral e o editor de linha do tempo). */
+  previewPlaying: boolean;
+  setPreviewPlaying: React.Dispatch<React.SetStateAction<boolean>>;
 
   // Render state
   rendering: boolean;
@@ -156,6 +181,20 @@ interface VideoProjectContextType {
   sceneMode: SceneMode;
   /** Duração da menor cena (útil para limitar o tempo de transição). */
   minSceneDuration: number;
+  /** Pontos de corte (s) detectados automaticamente nas pausas da narração. */
+  autoSceneCuts: number[];
+  /** true quando o usuário ajustou os cortes manualmente na linha do tempo. */
+  isCustomizedScenes: boolean;
+  /** Aplica novos cortes (mesma quantidade de cenas). Usado ao arrastar uma borda. */
+  commitSceneCuts: (cuts: number[]) => void;
+  /** Divide a cena que contém `time`; a mídia é duplicada na nova metade. */
+  splitSceneAt: (time: number) => boolean;
+  /** Funde a cena `index` com a seguinte (a mídia da seguinte sai). */
+  mergeSceneWithNext: (index: number) => boolean;
+  /** Descarta os ajustes manuais e volta à detecção automática. */
+  resetSceneCuts: () => void;
+  /** Define de que ponto do vídeo a cena começa a exibição. */
+  setMediaTrim: (index: number, trimStart: number) => void;
   effectiveMusicVolume: number;
   fileLoadProgress: Record<FileLoadKind, FileLoadProgress>;
 
@@ -274,6 +313,26 @@ function loadVideoPreview(source: string): Promise<{
   });
 }
 
+const EMPTY_SCENE_DATA_URL =
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+
+function createEmptySceneMedia(
+  sceneIndex: number,
+  id = `empty-scene-${generateId()}`,
+): SourceImage {
+  const element = new Image();
+  element.src = EMPTY_SCENE_DATA_URL;
+  return {
+    id,
+    name: `Cena ${sceneIndex + 1} sem mídia`,
+    url: EMPTY_SCENE_DATA_URL,
+    dataUrl: EMPTY_SCENE_DATA_URL,
+    kind: "image",
+    element,
+    isPlaceholder: true,
+  };
+}
+
 async function loadSingleMedia(file: File): Promise<SourceImage> {
   const dataUrl = await fileToDataUrl(file);
   if (file.type.startsWith("video/")) {
@@ -334,7 +393,25 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   const [script, setScript] = useState("");
 
   // 2 — Imagens
-  const [images, setImages] = useState<SourceImage[]>([]);
+  const [images, setImagesState] = useState<SourceImage[]>([]);
+  const imagesRef = useRef<SourceImage[]>([]);
+  const setImages = useCallback<React.Dispatch<React.SetStateAction<SourceImage[]>>>((value) => {
+    const next = typeof value === "function" ? value(imagesRef.current) : value;
+    imagesRef.current = next;
+    setImagesState(next);
+  }, []);
+
+  useEffect(() => {
+    imagesRef.current = images;
+  }, [images]);
+  // Lotes podem conter vídeos pesados e imagens leves. A fila garante que um
+  // lote posterior nunca seja encaixado antes de outro escolhido anteriormente.
+  const mediaBatchQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const enqueueMediaTask = useCallback((task: () => Promise<void>): Promise<void> => {
+    const operation = mediaBatchQueueRef.current.then(task);
+    mediaBatchQueueRef.current = operation.catch(() => {});
+    return operation;
+  }, []);
 
   // 3 — Narração
   const [narration, setNarration] = useState<AudioItem | null>(null);
@@ -446,9 +523,16 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   const [showCaptions, setShowCaptions] = useState(true);
   const [maxChars, setMaxChars] = useState(90);
   const [autoSyncCaptions, setAutoSyncCaptions] = useState(true);
-  const [vadSensitivity, setVadSensitivity] = useState(0.12);
-  const [vadMinSilence, setVadMinSilence] = useState(0.45);
+  const [vadSensitivity, setVadSensitivityRaw] = useState(0.12);
+  const [vadMinSilence, setVadMinSilenceRaw] = useState(0.45);
   const [customCaptions, setCustomCaptions] = useState<Caption[] | null>(null);
+  const [transcriptionWords, setTranscriptionWords] = useState<CaptionWord[]>([]);
+  const [transcriptionText, setTranscriptionText] = useState("");
+  const [transcriptionStatus, setTranscriptionStatus] = useState<
+    "idle" | "transcribing" | "ready" | "error"
+  >("idle");
+  const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
+  const transcriptionGenerationRef = useRef(0);
 
   // 5 — Música de fundo
   const [music, setMusic] = useState<AudioItem | null>(null);
@@ -491,8 +575,61 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   const [accent, setAccent] = useState(ACCENTS[0]!);
 
   // 7.1 — Cenas da Narração
-  const [sceneMinPauseSec, setSceneMinPauseSec] = useState(DEFAULT_SCENE_MIN_PAUSE_SEC);
-  const [minSceneDurationSec, setMinSceneDurationSec] = useState(DEFAULT_MIN_SCENE_DURATION_SEC);
+  const [sceneMinPauseSec, setSceneMinPauseSecRaw] = useState(DEFAULT_SCENE_MIN_PAUSE_SEC);
+  const [minSceneDurationSec, setMinSceneDurationSecRaw] = useState(DEFAULT_MIN_SCENE_DURATION_SEC);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+
+  // Cortes manuais feitos na linha do tempo. Ficam atrelados ao AudioBuffer em que
+  // foram feitos: se a narração mudar, deixam de valer automaticamente.
+  const [manualCuts, setManualCuts] = useState<{ cuts: number[]; buffer: AudioBuffer } | null>(
+    null,
+  );
+  const sceneCuts =
+    manualCuts && narration?.buffer && manualCuts.buffer === narration.buffer
+      ? manualCuts.cuts
+      : null;
+  const hasManualCutsRef = useRef(false);
+  hasManualCutsRef.current = sceneCuts !== null;
+  const isCustomizedScenes = sceneCuts !== null;
+
+  /** Reajustar a detecção automática descarta os cortes manuais (decisão explícita do usuário). */
+  const dropManualCuts = useCallback(() => {
+    if (hasManualCutsRef.current) {
+      hasManualCutsRef.current = false;
+      toast.info(
+        "Detecção automática reaplicada: os cortes manuais da linha do tempo foram descartados.",
+      );
+    }
+    setManualCuts(null);
+  }, []);
+  const setSceneMinPauseSec = useCallback(
+    (value: number) => {
+      dropManualCuts();
+      setSceneMinPauseSecRaw(value);
+    },
+    [dropManualCuts],
+  );
+  const setMinSceneDurationSec = useCallback(
+    (value: number) => {
+      dropManualCuts();
+      setMinSceneDurationSecRaw(value);
+    },
+    [dropManualCuts],
+  );
+  const setVadSensitivity = useCallback(
+    (value: number) => {
+      dropManualCuts();
+      setVadSensitivityRaw(value);
+    },
+    [dropManualCuts],
+  );
+  const setVadMinSilence = useCallback(
+    (value: number) => {
+      dropManualCuts();
+      setVadMinSilenceRaw(value);
+    },
+    [dropManualCuts],
+  );
 
   /* ── Valores derivados ── */
   const duration = narration?.buffer.duration ?? 0;
@@ -500,8 +637,8 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
   const effectiveMusicVolume = (duckOnly ? Math.min(musicVolume, 30) : musicVolume) / 100;
   const analysisMinSilenceSec = Math.min(vadMinSilence, sceneMinPauseSec);
 
-  // Cenas detectadas diretamente das pausas e trechos da narração
-  const detectedScenes = useMemo(() => {
+  // Cenas detectadas automaticamente a partir das pausas e trechos da narração
+  const autoScenes = useMemo(() => {
     if (!narration?.buffer || duration <= 0) return [] as DetectedNarrationScene[];
     return detectScenesFromAudio(narration.buffer, {
       minPauseSec: sceneMinPauseSec,
@@ -517,8 +654,28 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
     vadSensitivity,
     analysisMinSilenceSec,
   ]);
+  const autoSceneCuts = useMemo(() => cutsFromScenes(autoScenes), [autoScenes]);
+
+  // Grade efetiva: os cortes manuais (se existirem) valem mais que a detecção.
+  // Em ambos os casos as cenas são contíguas, sem sobreposição.
+  const detectedScenes = useMemo(
+    () => (sceneCuts && duration > 0 ? scenesFromCuts(sceneCuts, duration) : autoScenes),
+    [sceneCuts, duration, autoScenes],
+  );
+
+  const transcribedCaptions = useMemo(
+    () => captionsFromTranscription(transcriptionWords, maxChars),
+    [transcriptionWords, maxChars],
+  );
 
   const { captions: generatedCaptions, pausesCount } = useMemo(() => {
+    if (transcribedCaptions.length > 0) {
+      const detectedPauses = transcribedCaptions.reduce((count, caption, index) => {
+        const previous = transcribedCaptions[index - 1];
+        return count + (previous && caption.start - previous.end >= 0.4 ? 1 : 0);
+      }, 0);
+      return { captions: transcribedCaptions, pausesCount: detectedPauses };
+    }
     if (!script.trim() || duration <= 0) {
       return { captions: [], pausesCount: 0 };
     }
@@ -526,7 +683,9 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       return buildAudioSyncedCaptions(script, narration.buffer, duration, maxChars, {
         sensitivity: vadSensitivity,
         minSilenceSec: analysisMinSilenceSec,
-        sceneRanges: detectedScenes,
+        // As legendas seguem a fala (pausas reais). Mover o corte de uma imagem
+        // não pode deslocar o texto, por isso usam a detecção automática.
+        sceneRanges: autoScenes,
       });
     }
     return {
@@ -534,6 +693,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       pausesCount: 0,
     };
   }, [
+    transcribedCaptions,
     script,
     duration,
     maxChars,
@@ -541,7 +701,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
     narration?.buffer,
     vadSensitivity,
     analysisMinSilenceSec,
-    detectedScenes,
+    autoScenes,
   ]);
 
   const captions = customCaptions ?? generatedCaptions;
@@ -585,13 +745,96 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
     ? Math.min(...scenes.map((scene) => scene.duration))
     : perImage;
 
+  /* ── Edição manual da linha do tempo ── */
+  const commitSceneCuts = useCallback(
+    (cuts: number[]) => {
+      const buffer = narration?.buffer;
+      if (!buffer) return;
+      const currentCount = Math.max(0, detectedScenes.length - 1);
+      if (cuts.length !== currentCount || !areValidCuts(cuts, buffer.duration)) return;
+      setManualCuts({ cuts, buffer });
+    },
+    [narration?.buffer, detectedScenes.length],
+  );
+
+  const resetSceneCuts = useCallback(() => {
+    setManualCuts(null);
+  }, []);
+
+  const splitSceneAt = useCallback(
+    (time: number) => {
+      const buffer = narration?.buffer;
+      if (!buffer || !detectedScenes.length) return false;
+      const split = splitCutsAt(cutsFromScenes(detectedScenes), time, buffer.duration);
+      if (!split) {
+        toast.error(
+          `Posicione o cursor a pelo menos ${MIN_MANUAL_SCENE_SEC.toFixed(1)}s das bordas da cena para dividir.`,
+        );
+        return false;
+      }
+      const scene = detectedScenes[split.sceneIndex]!;
+      setManualCuts({ cuts: split.cuts, buffer });
+      // Como no CapCut, a divisão duplica o clipe: as duas metades mostram a mesma
+      // mídia e, em vídeos, a segunda metade continua de onde a primeira parou.
+      setImages((prev) => {
+        const source = prev[split.sceneIndex];
+        if (!source) return prev;
+        const copy: SourceImage = { ...source, id: `${source.name}-${generateId()}` };
+        if (source.kind === "video") {
+          const advanced = (source.trimStart ?? 0) + (time - scene.start);
+          const limit = source.duration ?? Number.POSITIVE_INFINITY;
+          copy.trimStart = advanced < limit - 0.1 ? advanced : 0;
+        }
+        const next = [...prev];
+        next.splice(split.sceneIndex + 1, 0, copy);
+        return next;
+      });
+      return true;
+    },
+    [narration?.buffer, detectedScenes, setImages],
+  );
+
+  const mergeSceneWithNext = useCallback(
+    (index: number) => {
+      const buffer = narration?.buffer;
+      if (!buffer) return false;
+      const merged = mergeCutsAt(cutsFromScenes(detectedScenes), index);
+      if (!merged) return false;
+      setManualCuts({ cuts: merged, buffer });
+      setImages((prev) =>
+        index + 1 < prev.length ? prev.filter((_, i) => i !== index + 1) : prev,
+      );
+      return true;
+    },
+    [narration?.buffer, detectedScenes, setImages],
+  );
+
+  const setMediaTrim = useCallback(
+    (index: number, trimStart: number) => {
+      setImages((prev) => {
+        const item = prev[index];
+        if (!item || item.kind !== "video") return prev;
+        const sceneDuration = scenes[index]?.duration ?? perImage;
+        const safe = clampVideoTrimStart(item.duration ?? 0, sceneDuration, trimStart);
+        const next = [...prev];
+        next[index] = { ...item, trimStart: safe };
+        return next;
+      });
+    },
+    [perImage, scenes, setImages],
+  );
+
   const updateCaption = useCallback(
     (index: number, updated: Partial<Caption>) => {
       setCustomCaptions((prev) => {
         const base = prev ?? [...generatedCaptions];
         const next = [...base];
         if (next[index]) {
-          next[index] = { ...next[index], ...updated };
+          const value = { ...next[index], ...updated };
+          if (updated.text !== undefined && updated.text !== next[index]!.text) {
+            delete value.words;
+          }
+          next[index] = value;
         }
         return next;
       });
@@ -603,9 +846,43 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
     setCustomCaptions(null);
   }, []);
 
+  const transcribeNarration = useCallback(async () => {
+    if (!narration) {
+      toast.error("Carregue uma narração antes de gerar a transcrição.");
+      return;
+    }
+
+    const generation = ++transcriptionGenerationRef.current;
+    setTranscriptionStatus("transcribing");
+    setTranscriptionError(null);
+    try {
+      const result = await transcribeAudio(narration);
+      if (generation !== transcriptionGenerationRef.current) return;
+      setTranscriptionWords(result.words);
+      setTranscriptionText(result.text);
+      setCustomCaptions(null);
+      setTranscriptionStatus("ready");
+      toast.success("Narração transcrita com tempos reais por palavra.");
+    } catch (error) {
+      if (generation !== transcriptionGenerationRef.current) return;
+      const message = error instanceof Error ? error.message : "Falha ao transcrever a narração.";
+      setTranscriptionStatus("error");
+      setTranscriptionError(message);
+      toast.error(message);
+    }
+  }, [narration]);
+
   useEffect(() => {
     setCustomCaptions(null);
   }, [script, narration?.url]);
+
+  useEffect(() => {
+    transcriptionGenerationRef.current += 1;
+    setTranscriptionWords([]);
+    setTranscriptionText("");
+    setTranscriptionError(null);
+    setTranscriptionStatus("idle");
+  }, [narration?.url]);
 
   /* ── Detectar Banco de Dados ── */
   useEffect(() => {
@@ -653,171 +930,209 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
 
   /* ── Carregar imagens e vídeos com DataURL para persistência ── */
   const addImages = useCallback(
-    async (files: File[]) => {
-      const compatible = files.filter(
-        (file) => file.type.startsWith("image/") || file.type.startsWith("video/"),
-      );
-      if (!compatible.length) {
-        const message = "Selecione arquivos de imagem ou vídeo válidos.";
-        updateFileLoadProgress("images", { status: "error", progress: 0, message });
-        toast.error(message);
-        return;
-      }
-
-      const availableSlots = detectedScenes.length
-        ? Math.max(0, detectedScenes.length - images.length)
-        : compatible.length;
-      if (availableSlots === 0) {
-        toast.error("Todas as cenas detectadas já possuem mídia.");
-        return;
-      }
-      const picked = compatible.slice(0, availableSlots);
-      if (picked.length < compatible.length) {
-        toast.info(
-          `${compatible.length - picked.length} arquivo(s) excedente(s) não foram adicionados.`,
+    (files: File[]): Promise<void> => {
+      // Copia a lista imediatamente: FileList/DataTransfer não deve definir a
+      // ordem depois que o processamento assíncrono já começou.
+      const selectedFiles = [...files];
+      const detectedSceneCount = detectedScenes.length;
+      return enqueueMediaTask(async () => {
+        const compatible = selectedFiles.filter(
+          (file) => file.type.startsWith("image/") || file.type.startsWith("video/"),
         );
-      }
+        if (!compatible.length) {
+          const message = "Selecione arquivos de imagem ou vídeo válidos.";
+          updateFileLoadProgress("images", { status: "error", progress: 0, message });
+          toast.error(message);
+          return;
+        }
 
-      updateFileLoadProgress("images", {
-        status: "reading",
-        progress: 0,
-        message: `Carregando ${picked.length} mídia(s)…`,
-      });
+        const currentCount = imagesRef.current
+          .slice(0, detectedSceneCount)
+          .filter(isFilledMedia).length;
+        const availableSlots = detectedSceneCount
+          ? Math.max(0, detectedSceneCount - currentCount)
+          : compatible.length;
+        if (availableSlots === 0) {
+          toast.error("Todas as cenas detectadas já possuem mídia.");
+          return;
+        }
+        const picked = compatible.slice(0, availableSlots);
+        if (picked.length < compatible.length) {
+          toast.info(
+            `${compatible.length - picked.length} arquivo(s) excedente(s) não foram adicionados.`,
+          );
+        }
 
-      try {
-        const itemProgress = new Array<number>(picked.length).fill(0);
-        const loaded = await Promise.all(
-          picked.map(async (file, index) => {
-            const dataUrl = await fileToDataUrl(file, (progress) => {
-              itemProgress[index] = progress;
-              const total = itemProgress.reduce((sum, value) => sum + value, 0) / picked.length;
-              updateFileLoadProgress("images", {
-                status: "reading",
-                progress: Math.min(90, total * 0.9),
-                message: `Lendo ${file.name}…`,
-              });
-            });
-            updateFileLoadProgress("images", {
-              status: "processing",
-              progress: 90 + ((index + 1) / picked.length) * 9,
-              message: `Validando ${file.name}…`,
-            });
-            return new Promise<SourceImage>((resolve, reject) => {
-              if (file.type.startsWith("video/")) {
-                void loadVideoPreview(dataUrl)
-                  .then(({ element, duration, posterUrl }) =>
-                    resolve({
-                      id: `${file.name}-${generateId()}`,
-                      name: file.name,
-                      url: dataUrl,
-                      dataUrl,
-                      blob: file,
-                      kind: "video",
-                      ...(duration ? { duration } : {}),
-                      ...(posterUrl ? { posterUrl } : {}),
-                      element,
-                    }),
-                  )
-                  .catch(() => reject(new Error(`Não foi possível ler ${file.name}`)));
-                return;
-              }
-              const el = new Image();
-              el.onload = () =>
-                resolve({
-                  id: `${file.name}-${generateId()}`,
-                  name: file.name,
-                  url: dataUrl,
-                  dataUrl,
-                  blob: file,
-                  kind: "image",
-                  element: el,
-                });
-              el.onerror = () => reject(new Error(`Não foi possível ler ${file.name}`));
-              el.src = dataUrl;
-            });
-          }),
-        );
-        setImages((prev) => [...prev, ...loaded]);
         updateFileLoadProgress("images", {
-          status: "ready",
-          progress: 100,
-          message: `${loaded.length} mídia(s) pronta(s)`,
+          status: "reading",
+          progress: 0,
+          message: `Carregando ${picked.length} mídia(s) na ordem selecionada…`,
         });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Falha ao carregar as mídias.";
-        updateFileLoadProgress("images", { status: "error", progress: 0, message });
-        toast.error(message);
-      }
+
+        try {
+          const itemProgress = new Array<number>(picked.length).fill(0);
+          // Promise.all mantém a posição de cada resultado igual à posição do
+          // arquivo em picked, independentemente de qual mídia termina primeiro.
+          const loaded = await Promise.all(
+            picked.map(async (file, index) => {
+              const dataUrl = await fileToDataUrl(file, (progress) => {
+                itemProgress[index] = progress;
+                const total = itemProgress.reduce((sum, value) => sum + value, 0) / picked.length;
+                updateFileLoadProgress("images", {
+                  status: "reading",
+                  progress: Math.min(90, total * 0.9),
+                  message: `Lendo ${file.name}…`,
+                });
+              });
+              updateFileLoadProgress("images", {
+                status: "processing",
+                progress: 90 + ((index + 1) / picked.length) * 9,
+                message: `Validando ${file.name}…`,
+              });
+              return new Promise<SourceImage>((resolve, reject) => {
+                if (file.type.startsWith("video/")) {
+                  void loadVideoPreview(dataUrl)
+                    .then(({ element, duration, posterUrl }) =>
+                      resolve({
+                        id: `${file.name}-${generateId()}`,
+                        name: file.name,
+                        url: dataUrl,
+                        dataUrl,
+                        blob: file,
+                        kind: "video",
+                        ...(duration ? { duration } : {}),
+                        ...(posterUrl ? { posterUrl } : {}),
+                        element,
+                      }),
+                    )
+                    .catch(() => reject(new Error(`Não foi possível ler ${file.name}`)));
+                  return;
+                }
+                const el = new Image();
+                el.onload = () =>
+                  resolve({
+                    id: `${file.name}-${generateId()}`,
+                    name: file.name,
+                    url: dataUrl,
+                    dataUrl,
+                    blob: file,
+                    kind: "image",
+                    element: el,
+                  });
+                el.onerror = () => reject(new Error(`Não foi possível ler ${file.name}`));
+                el.src = dataUrl;
+              });
+            }),
+          );
+          setImages((prev) => {
+            // Preenche primeiro os cards vazios, sem alterar o índice das cenas
+            // que já possuem mídia.
+            const next = fillEmptyMediaSlotsInOrder(prev, loaded);
+            imagesRef.current = next;
+            return next;
+          });
+          updateFileLoadProgress("images", {
+            status: "ready",
+            progress: 100,
+            message: `${loaded.length} mídia(s) pronta(s), na ordem selecionada`,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Falha ao carregar as mídias.";
+          updateFileLoadProgress("images", { status: "error", progress: 0, message });
+          toast.error(message);
+        }
+      });
     },
-    [detectedScenes.length, images.length, updateFileLoadProgress],
+    [detectedScenes.length, enqueueMediaTask, setImages, updateFileLoadProgress],
   );
 
   /* ── Manipulação de Imagens (Reordenar e Remover) ── */
-  const removeImage = useCallback((id: string) => {
-    setImages((prev) => (prev.at(-1)?.id === id ? prev.slice(0, -1) : prev));
-  }, []);
-
-  const moveImage = useCallback((index: number, direction: -1 | 1) => {
-    setImages((prev) => {
-      const targetIndex = index + direction;
-      if (targetIndex < 0 || targetIndex >= prev.length) return prev;
-      const copy = [...prev];
-      const temp = copy[index]!;
-      copy[index] = copy[targetIndex]!;
-      copy[targetIndex] = temp;
-      return copy;
-    });
-  }, []);
-
-  const reorderImages = useCallback((fromIndex: number, toIndex: number) => {
-    setImages((prev) => {
-      if (fromIndex < 0 || fromIndex >= prev.length || toIndex < 0 || toIndex >= prev.length) {
-        return prev;
-      }
-      const copy = [...prev];
-      const [moved] = copy.splice(fromIndex, 1);
-      if (moved) copy.splice(toIndex, 0, moved);
-      return copy;
-    });
-  }, []);
-
-  const replaceImageAt = useCallback(async (index: number, file: File) => {
-    try {
-      const item = await loadSingleMedia(file);
+  const removeImage = useCallback(
+    (id: string) => {
       setImages((prev) => {
+        const index = prev.findIndex((item) => item.id === id);
+        if (index < 0 || !isFilledMedia(prev[index])) return prev;
         const next = [...prev];
-        next[index] = item;
+        next[index] = createEmptySceneMedia(index);
+        imagesRef.current = next;
         return next;
       });
-      toast.success(`Mídia da Cena ${index + 1} atualizada.`);
-    } catch (err) {
-      toast.error("Falha ao carregar a mídia.");
-    }
-  }, []);
+    },
+    [setImages],
+  );
+
+  const moveImage = useCallback(
+    (index: number, direction: -1 | 1) => {
+      setImages((prev) => {
+        const targetIndex = index + direction;
+        if (targetIndex < 0 || targetIndex >= prev.length) return prev;
+        const copy = [...prev];
+        const temp = copy[index]!;
+        copy[index] = copy[targetIndex]!;
+        copy[targetIndex] = temp;
+        return copy;
+      });
+    },
+    [setImages],
+  );
+
+  const reorderImages = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      setImages((prev) => {
+        if (fromIndex < 0 || fromIndex >= prev.length || toIndex < 0 || toIndex >= prev.length) {
+          return prev;
+        }
+        const copy = [...prev];
+        const [moved] = copy.splice(fromIndex, 1);
+        if (moved) copy.splice(toIndex, 0, moved);
+        return copy;
+      });
+    },
+    [setImages],
+  );
+
+  const replaceImageAt = useCallback(
+    (index: number, file: File) =>
+      enqueueMediaTask(async () => {
+        try {
+          const item = await loadSingleMedia(file);
+          setImages((prev) => {
+            const next = [...prev];
+            next[index] = item;
+            return next;
+          });
+          toast.success(`Mídia da Cena ${index + 1} atualizada.`);
+        } catch {
+          toast.error("Falha ao carregar a mídia.");
+        }
+      }),
+    [enqueueMediaTask, setImages],
+  );
 
   const setImageForScene = useCallback(
-    async (sceneIndex: number, file: File) => {
-      if (sceneIndex > images.length) {
-        toast.info("Preencha as cenas anteriores antes de adicionar esta mídia.");
-        return;
-      }
-      try {
-        const item = await loadSingleMedia(file);
-        setImages((prev) => {
-          const next = [...prev];
-          if (sceneIndex < next.length) {
-            next[sceneIndex] = item;
-          } else {
-            next.push(item);
-          }
-          return next;
-        });
-        toast.success(`Mídia encaixada na Cena ${sceneIndex + 1}.`);
-      } catch (err) {
-        toast.error("Falha ao carregar a mídia.");
-      }
-    },
-    [images.length],
+    (sceneIndex: number, file: File) =>
+      enqueueMediaTask(async () => {
+        if (sceneIndex > imagesRef.current.length) {
+          toast.info("Preencha as cenas anteriores antes de adicionar esta mídia.");
+          return;
+        }
+        try {
+          const item = await loadSingleMedia(file);
+          setImages((prev) => {
+            const next = [...prev];
+            if (sceneIndex < next.length) {
+              next[sceneIndex] = item;
+            } else {
+              next.push(item);
+            }
+            return next;
+          });
+          toast.success(`Mídia encaixada na Cena ${sceneIndex + 1}.`);
+        } catch {
+          toast.error("Falha ao carregar a mídia.");
+        }
+      }),
+    [enqueueMediaTask, setImages],
   );
 
   /* ── Carregar áudio com DataURL para persistência ── */
@@ -899,12 +1214,16 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
           kind: img.kind,
           duration: img.duration,
           posterUrl: img.posterUrl,
+          trimStart: img.trimStart,
+          isPlaceholder: img.isPlaceholder,
         }));
 
         const narrationData = narration
           ? {
               name: narration.name,
               dataUrl: narration.dataUrl || narration.url,
+              // Cortes manuais da linha do tempo; ausentes = detecção automática.
+              ...(sceneCuts ? { sceneCuts } : {}),
             }
           : null;
 
@@ -971,167 +1290,186 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       images,
       narration,
       music,
+      sceneCuts,
     ],
   );
 
   /* ── Carregar Projeto do Banco de Dados ── */
-  const loadProjectFromDb = useCallback(async (id: string) => {
-    try {
-      setSaveStatus("saving");
-      const proj = await getProjectFn({ data: id });
-      if (!proj) {
-        toast.error("Projeto não encontrado.");
-        setSaveStatus("idle");
-        return;
-      }
+  const loadProjectFromDb = useCallback(
+    async (id: string) => {
+      try {
+        setSaveStatus("saving");
+        const proj = await getProjectFn({ data: id });
+        if (!proj) {
+          toast.error("Projeto não encontrado.");
+          setSaveStatus("idle");
+          return;
+        }
 
-      setProjectId(proj.id);
-      setProjectName(proj.name);
-      setScript(proj.script || "");
-      setMusicVolume(proj.musicVolume ?? 12);
-      setNarrationVolume(proj.narrationVolume ?? 100);
-      setDuckOnly(proj.duckOnly ?? true);
-      setShowCaptions(proj.showCaptions ?? true);
-      setMaxChars(proj.maxChars ?? 90);
-      setPreset((proj.preset as PresetKey) || "1080p");
-      setFps(proj.fps ?? 30);
-      setKenBurns(proj.kenBurns ?? true);
-      const previousAutomaticTitle = (proj.script || "")
-        .trim()
-        .split(/[.!?\n]/)[0]
-        ?.slice(0, 70);
-      setThumbTitle(proj.thumbTitle === previousAutomaticTitle ? "" : proj.thumbTitle || "");
-      setThumbSubtitle(proj.thumbSubtitle || "");
-      setAccent(proj.accent || ACCENTS[0]!);
-      setThumbIndex(proj.thumbIndex ?? 0);
+        setProjectId(proj.id);
+        setProjectName(proj.name);
+        setScript(proj.script || "");
+        setMusicVolume(proj.musicVolume ?? 12);
+        setNarrationVolume(proj.narrationVolume ?? 100);
+        setDuckOnly(proj.duckOnly ?? true);
+        setShowCaptions(proj.showCaptions ?? true);
+        setMaxChars(proj.maxChars ?? 90);
+        setPreset((proj.preset as PresetKey) || "1080p");
+        setFps(proj.fps ?? 30);
+        setKenBurns(proj.kenBurns ?? true);
+        const previousAutomaticTitle = (proj.script || "")
+          .trim()
+          .split(/[.!?\n]/)[0]
+          ?.slice(0, 70);
+        setThumbTitle(proj.thumbTitle === previousAutomaticTitle ? "" : proj.thumbTitle || "");
+        setThumbSubtitle(proj.thumbSubtitle || "");
+        setAccent(proj.accent || ACCENTS[0]!);
+        setThumbIndex(proj.thumbIndex ?? 0);
 
-      // Reconstruir imagens
-      if (proj.imagesJson) {
-        try {
-          const rawImages = JSON.parse(proj.imagesJson) as Array<{
-            id: string;
-            name: string;
-            dataUrl: string;
-            kind?: "image" | "video";
-            duration?: number;
-            posterUrl?: string;
-          }>;
-          const loadedImages = await Promise.all(
-            rawImages.map(
-              (img) =>
-                new Promise<SourceImage>((resolve) => {
-                  if (img.kind === "video") {
-                    void loadVideoPreview(img.dataUrl)
-                      .then(({ element, duration, posterUrl }) =>
-                        resolve({
-                          ...img,
-                          url: img.dataUrl,
-                          kind: "video",
-                          ...(Number.isFinite(duration || img.duration)
-                            ? { duration: duration || img.duration! }
-                            : {}),
-                          ...(posterUrl || img.posterUrl
-                            ? { posterUrl: posterUrl || img.posterUrl }
-                            : {}),
-                          element,
-                        }),
-                      )
-                      .catch(() => {
-                        const element = document.createElement("video");
-                        element.muted = true;
-                        element.src = img.dataUrl;
-                        resolve({ ...img, url: img.dataUrl, kind: "video", element });
+        // Reconstruir imagens
+        if (proj.imagesJson) {
+          try {
+            const rawImages = JSON.parse(proj.imagesJson) as Array<{
+              id: string;
+              name: string;
+              dataUrl: string;
+              kind?: "image" | "video";
+              duration?: number;
+              posterUrl?: string;
+              trimStart?: number;
+              isPlaceholder?: boolean;
+            }>;
+            const loadedImages = await Promise.all(
+              rawImages.map(
+                (img, imageIndex) =>
+                  new Promise<SourceImage>((resolve) => {
+                    if (img.isPlaceholder) {
+                      resolve(createEmptySceneMedia(imageIndex, img.id));
+                      return;
+                    }
+                    if (img.kind === "video") {
+                      void loadVideoPreview(img.dataUrl)
+                        .then(({ element, duration, posterUrl }) =>
+                          resolve({
+                            ...img,
+                            url: img.dataUrl,
+                            kind: "video",
+                            ...(Number.isFinite(duration || img.duration)
+                              ? { duration: duration || img.duration! }
+                              : {}),
+                            ...(posterUrl || img.posterUrl
+                              ? { posterUrl: posterUrl || img.posterUrl }
+                              : {}),
+                            element,
+                          }),
+                        )
+                        .catch(() => {
+                          const element = document.createElement("video");
+                          element.muted = true;
+                          element.src = img.dataUrl;
+                          resolve({ ...img, url: img.dataUrl, kind: "video", element });
+                        });
+                      return;
+                    }
+                    const el = new Image();
+                    el.onload = () =>
+                      resolve({
+                        id: img.id,
+                        name: img.name,
+                        url: img.dataUrl,
+                        dataUrl: img.dataUrl,
+                        kind: "image",
+                        element: el,
                       });
-                    return;
-                  }
-                  const el = new Image();
-                  el.onload = () =>
-                    resolve({
-                      id: img.id,
-                      name: img.name,
-                      url: img.dataUrl,
-                      dataUrl: img.dataUrl,
-                      kind: "image",
-                      element: el,
-                    });
-                  el.onerror = () =>
-                    resolve({
-                      id: img.id,
-                      name: img.name,
-                      url: img.dataUrl,
-                      dataUrl: img.dataUrl,
-                      kind: "image",
-                      element: el,
-                    });
-                  el.src = img.dataUrl;
-                }),
-            ),
-          );
-          setImages(loadedImages);
-        } catch (e) {
-          console.error("Falha ao reconstruir imagens:", e);
+                    el.onerror = () =>
+                      resolve({
+                        id: img.id,
+                        name: img.name,
+                        url: img.dataUrl,
+                        dataUrl: img.dataUrl,
+                        kind: "image",
+                        element: el,
+                      });
+                    el.src = img.dataUrl;
+                  }),
+              ),
+            );
+            imagesRef.current = loadedImages;
+            setImages(loadedImages);
+          } catch (e) {
+            console.error("Falha ao reconstruir imagens:", e);
+          }
         }
-      }
 
-      // Reconstruir narração
-      if (proj.narrationJson) {
-        try {
-          const rawNarr = JSON.parse(proj.narrationJson) as {
-            name: string;
-            dataUrl: string;
-          };
-          const blob = dataUrlToBlob(rawNarr.dataUrl);
-          const file = new File([blob], rawNarr.name, { type: blob.type });
-          const buffer = await decodeAudio(file);
-          setNarration({
-            name: rawNarr.name,
-            url: rawNarr.dataUrl,
-            dataUrl: rawNarr.dataUrl,
-            buffer,
-          });
-        } catch (e) {
-          console.error("Falha ao decodificar narração:", e);
+        // Reconstruir narração
+        if (proj.narrationJson) {
+          try {
+            const rawNarr = JSON.parse(proj.narrationJson) as {
+              name: string;
+              dataUrl: string;
+              sceneCuts?: number[];
+            };
+            const blob = dataUrlToBlob(rawNarr.dataUrl);
+            const file = new File([blob], rawNarr.name, { type: blob.type });
+            const buffer = await decodeAudio(file);
+            setNarration({
+              name: rawNarr.name,
+              url: rawNarr.dataUrl,
+              dataUrl: rawNarr.dataUrl,
+              buffer,
+            });
+            // Os cortes manuais voltam presos ao buffer recém-decodificado.
+            setManualCuts(
+              Array.isArray(rawNarr.sceneCuts) && areValidCuts(rawNarr.sceneCuts, buffer.duration)
+                ? { cuts: rawNarr.sceneCuts, buffer }
+                : null,
+            );
+          } catch (e) {
+            console.error("Falha ao decodificar narração:", e);
+          }
+        } else {
+          setNarration(null);
+          setManualCuts(null);
         }
-      } else {
-        setNarration(null);
-      }
 
-      // Reconstruir música
-      if (proj.musicJson) {
-        try {
-          const rawMus = JSON.parse(proj.musicJson) as {
-            name: string;
-            dataUrl: string;
-          };
-          const blob = dataUrlToBlob(rawMus.dataUrl);
-          const file = new File([blob], rawMus.name, { type: blob.type });
-          const buffer = await decodeAudio(file);
-          setMusic({
-            name: rawMus.name,
-            url: rawMus.dataUrl,
-            dataUrl: rawMus.dataUrl,
-            buffer,
-          });
-        } catch (e) {
-          console.error("Falha ao decodificar música:", e);
+        // Reconstruir música
+        if (proj.musicJson) {
+          try {
+            const rawMus = JSON.parse(proj.musicJson) as {
+              name: string;
+              dataUrl: string;
+            };
+            const blob = dataUrlToBlob(rawMus.dataUrl);
+            const file = new File([blob], rawMus.name, { type: blob.type });
+            const buffer = await decodeAudio(file);
+            setMusic({
+              name: rawMus.name,
+              url: rawMus.dataUrl,
+              dataUrl: rawMus.dataUrl,
+              buffer,
+            });
+          } catch (e) {
+            console.error("Falha ao decodificar música:", e);
+          }
+        } else {
+          setMusic(null);
         }
-      } else {
-        setMusic(null);
-      }
 
-      if (typeof localStorage !== "undefined") {
-        localStorage.setItem("current_project_id", proj.id);
-      }
+        if (typeof localStorage !== "undefined") {
+          localStorage.setItem("current_project_id", proj.id);
+        }
 
-      setSaveStatus("saved");
-      setLastSavedAt(new Date());
-      toast.success(`Projeto "${proj.name}" carregado com sucesso!`);
-    } catch (err) {
-      console.error("Erro ao carregar projeto:", err);
-      toast.error("Erro ao carregar projeto do banco de dados.");
-      setSaveStatus("error");
-    }
-  }, []);
+        setSaveStatus("saved");
+        setLastSavedAt(new Date());
+        toast.success(`Projeto "${proj.name}" carregado com sucesso!`);
+      } catch (err) {
+        console.error("Erro ao carregar projeto:", err);
+        toast.error("Erro ao carregar projeto do banco de dados.");
+        setSaveStatus("error");
+      }
+    },
+    [setImages],
+  );
 
   /* ── Criar Novo Projeto ── */
   const createNewProject = useCallback(() => {
@@ -1141,6 +1479,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
     setScript("");
     setImages([]);
     setNarration(null);
+    setManualCuts(null);
     setMusic(null);
     setResult(null);
     setThumbTitle("");
@@ -1157,7 +1496,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       localStorage.setItem("current_project_id", newId);
     }
     toast.info("Novo projeto criado.");
-  }, []);
+  }, [setImages]);
 
   /* ── Valor do contexto (memoizado) ── */
   const value = useMemo<VideoProjectContextType>(
@@ -1206,6 +1545,11 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       vadMinSilence,
       setVadMinSilence,
       pausesCount,
+      transcriptionStatus,
+      transcriptionError,
+      transcriptionText,
+      hasAudioTranscription: transcriptionWords.length > 0,
+      transcribeNarration,
       isCustomizedCaptions,
       updateCaption,
       resetCaptionsToAuto,
@@ -1221,6 +1565,8 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       setPreferredFormat,
       previewTime,
       setPreviewTime,
+      previewPlaying,
+      setPreviewPlaying,
       rendering,
       setRendering,
       progress,
@@ -1247,6 +1593,13 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       scenes,
       sceneMode,
       minSceneDuration,
+      autoSceneCuts,
+      isCustomizedScenes,
+      commitSceneCuts,
+      splitSceneAt,
+      mergeSceneWithNext,
+      resetSceneCuts,
+      setMediaTrim,
       effectiveMusicVolume,
       fileLoadProgress,
       loadAudio,
@@ -1265,6 +1618,7 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       script,
       loadScriptFile,
       images,
+      setImages,
       addImages,
       removeImage,
       moveImage,
@@ -1285,6 +1639,11 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       vadSensitivity,
       vadMinSilence,
       pausesCount,
+      transcriptionStatus,
+      transcriptionError,
+      transcriptionText,
+      transcriptionWords.length,
+      transcribeNarration,
       isCustomizedCaptions,
       updateCaption,
       resetCaptionsToAuto,
@@ -1307,10 +1666,22 @@ export function VideoProjectProvider({ children }: { children: ReactNode }) {
       perImage,
       detectedScenes,
       sceneMinPauseSec,
+      setSceneMinPauseSec,
       minSceneDurationSec,
+      setMinSceneDurationSec,
+      setVadSensitivity,
+      setVadMinSilence,
       scenes,
       sceneMode,
       minSceneDuration,
+      autoSceneCuts,
+      isCustomizedScenes,
+      commitSceneCuts,
+      splitSceneAt,
+      mergeSceneWithNext,
+      resetSceneCuts,
+      setMediaTrim,
+      previewPlaying,
       effectiveMusicVolume,
       fileLoadProgress,
       loadAudio,

@@ -8,7 +8,10 @@ import {
   SlidersHorizontal,
   ChevronDown,
   ChevronUp,
-  Volume2,
+  AudioLines,
+  CheckCircle2,
+  LoaderCircle,
+  TriangleAlert,
 } from "lucide-react";
 import { StepCard } from "./StepCard";
 import { Button } from "@/components/ui/button";
@@ -32,6 +35,10 @@ export function CaptionsStep() {
     vadMinSilence,
     setVadMinSilence,
     pausesCount,
+    transcriptionStatus,
+    transcriptionError,
+    hasAudioTranscription,
+    transcribeNarration,
     isCustomizedCaptions,
     updateCaption,
     resetCaptionsToAuto,
@@ -45,7 +52,7 @@ export function CaptionsStep() {
     <StepCard
       index={4}
       title="Legendas"
-      description="Geradas a partir do roteiro e sincronizadas com as pausas reais da narração."
+      description="Transcreva a narração para obter o texto falado e os tempos reais por palavra."
       done={captions.length > 0}
       aside={
         <div className="flex items-center gap-2">
@@ -84,48 +91,85 @@ export function CaptionsStep() {
         </Button>
       </div>
 
-      {/* Sincronização inteligente com detecção de pausas */}
+      {/* Transcrição profissional do áudio; VAD permanece como fallback local. */}
       {narration && (
         <div className="mt-4 rounded-xl border border-primary/20 bg-primary/5 p-3.5 text-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <Sparkles className="size-4 text-primary shrink-0" />
+              {hasAudioTranscription ? (
+                <CheckCircle2 className="size-4 shrink-0 text-emerald-500" />
+              ) : (
+                <AudioLines className="size-4 text-primary shrink-0" />
+              )}
               <div>
                 <span className="font-semibold text-foreground">
-                  Sincronização Inteligente por Detecção de Silêncio (VAD)
+                  {hasAudioTranscription
+                    ? "Legenda transcrita da narração"
+                    : "Transcrição profissional da narração"}
                 </span>
                 <p className="text-[11px] text-muted-foreground mt-0.5">
-                  Detecta quando o narrador para de falar e pausa a legenda, evitando que fique
-                  descasada.
+                  {hasAudioTranscription
+                    ? "O texto e o destaque usam os instantes reconhecidos no áudio."
+                    : "Reconhece o que foi realmente falado e obtém o tempo de cada palavra."}
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
-              {autoSyncCaptions && (
-                <span className="rounded-full bg-primary/10 px-2.5 py-0.5 font-medium text-primary text-[11px]">
-                  {pausesCount > 0 ? `${pausesCount} pausas detectadas` : "Análise em tempo real"}
-                </span>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void transcribeNarration()}
+              disabled={transcriptionStatus === "transcribing"}
+            >
+              {transcriptionStatus === "transcribing" ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : (
+                <Sparkles className="size-4" />
               )}
-              <Switch
-                checked={autoSyncCaptions}
-                onCheckedChange={setAutoSyncCaptions}
-                aria-label="Ativar sincronização inteligente de fala"
-              />
-            </div>
+              {transcriptionStatus === "transcribing"
+                ? "Transcrevendo…"
+                : hasAudioTranscription
+                  ? "Transcrever novamente"
+                  : "Transcrever áudio"}
+            </Button>
           </div>
 
-          <div className="mt-2.5 flex items-center justify-between border-t border-border/50 pt-2">
-            <button
-              type="button"
-              onClick={() => setShowAdvanced(!showAdvanced)}
-              className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-            >
-              <SlidersHorizontal className="size-3" />
-              <span>Ajustes finos de detecção de pausa</span>
-              {showAdvanced ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
-            </button>
+          {transcriptionError && (
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-2.5 text-[11px] text-destructive">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+              <span>{transcriptionError}</span>
+            </div>
+          )}
 
+          <div className="mt-2.5 flex items-center justify-between border-t border-border/50 pt-2">
+            {!hasAudioTranscription ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAdvanced(!showAdvanced)}
+                  className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <SlidersHorizontal className="size-3" />
+                  <span>Fallback local pelo roteiro e detecção de pausas</span>
+                  {showAdvanced ? (
+                    <ChevronUp className="size-3" />
+                  ) : (
+                    <ChevronDown className="size-3" />
+                  )}
+                </button>
+                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                  {autoSyncCaptions
+                    ? `${pausesCount} ${pausesCount === 1 ? "pausa detectada" : "pausas detectadas"}`
+                    : "Sincronização por pausas desativada"}
+                </span>
+              </div>
+            ) : (
+              <span className="text-[11px] text-muted-foreground">
+                {pausesCount > 0
+                  ? `${pausesCount} pausas entre blocos`
+                  : "Tempos por palavra ativos"}
+              </span>
+            )}
             {isCustomizedCaptions && (
               <Button
                 variant="ghost"
@@ -139,9 +183,24 @@ export function CaptionsStep() {
             )}
           </div>
 
-          {showAdvanced && (
+          {showAdvanced && !hasAudioTranscription && (
             <div className="mt-3 grid gap-3 border-t border-border/40 pt-3 sm:grid-cols-2">
               <div>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <Label className="text-[11px] text-foreground">
+                      Sincronizar roteiro por pausas
+                    </Label>
+                    <p className="text-[10px] text-muted-foreground">
+                      Não reconhece palavras; use apenas se a transcrição estiver indisponível.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={autoSyncCaptions}
+                    onCheckedChange={setAutoSyncCaptions}
+                    aria-label="Sincronizar o roteiro pelas pausas"
+                  />
+                </div>
                 <Label className="text-[11px] text-muted-foreground">
                   Duração mínima de pausa: {vadMinSilence.toFixed(2)} s
                 </Label>
@@ -255,7 +314,8 @@ export function CaptionsStep() {
         </div>
       ) : (
         <p className="mt-4 text-sm text-muted-foreground">
-          Carregue o roteiro e a narração para gerar as legendas sincronizadas.
+          Carregue uma narração para transcrever o áudio ou adicione também um roteiro para usar o
+          fallback local.
         </p>
       )}
     </StepCard>

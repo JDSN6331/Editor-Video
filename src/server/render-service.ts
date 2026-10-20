@@ -26,6 +26,7 @@ interface CaptionInput {
   start: number;
   end: number;
   text: string;
+  words?: Array<{ text: string; start: number; end: number }>;
 }
 
 type MotionEffect = "none" | "ken-burns" | "zoom" | "pan" | "dissolve" | "zoom-out";
@@ -273,10 +274,25 @@ function validateMetadata(raw: unknown): RenderMetadata {
     .slice(0, 5000)
     .map((item) => {
       const caption = item as Record<string, unknown>;
+      const start = numberInRange(caption["start"], 0, 0, duration);
+      const end = numberInRange(caption["end"], 0, 0, duration);
+      const rawWords = Array.isArray(caption["words"]) ? caption["words"] : [];
+      const words = rawWords
+        .slice(0, 1000)
+        .map((rawWord) => {
+          const word = (rawWord ?? {}) as Record<string, unknown>;
+          return {
+            text: String(word["text"] || "").slice(0, 200),
+            start: numberInRange(word["start"], start, start, end),
+            end: numberInRange(word["end"], end, start, end),
+          };
+        })
+        .filter((word) => word.text && word.end > word.start);
       return {
-        start: numberInRange(caption["start"], 0, 0, duration),
-        end: numberInRange(caption["end"], 0, 0, duration),
+        start,
+        end,
         text: String(caption["text"] || "").slice(0, 1000),
+        ...(words.length ? { words } : {}),
       };
     })
     .filter((caption) => caption.text && caption.end > caption.start);
@@ -349,7 +365,9 @@ function buildAss(
   const backgroundEvents: string[] = [];
   const textEvents: string[] = [];
   for (const caption of captions) {
-    const words = caption.text.trim().split(/\s+/).filter(Boolean);
+    const timedWords = caption.words?.length ? caption.words : null;
+    const words =
+      timedWords?.map((word) => word.text) ?? caption.text.trim().split(/\s+/).filter(Boolean);
     const totalCs = Math.max(1, Math.round((caption.end - caption.start) * 100));
     const totalChars = Math.max(
       1,
@@ -359,8 +377,14 @@ function buildAss(
     const karaoke = words
       .map((word, index) => {
         const remaining = totalCs - used;
-        const duration =
-          index === words.length - 1
+        const nextTimedStart = timedWords?.[index + 1]?.start;
+        const timedStart = timedWords?.[index]?.start;
+        const duration = timedWords
+          ? Math.max(
+              1,
+              Math.round(((nextTimedStart ?? caption.end) - (timedStart ?? caption.start)) * 100),
+            )
+          : index === words.length - 1
             ? Math.max(1, remaining)
             : Math.max(1, Math.round((totalCs * word.length) / totalChars));
         used += duration;
@@ -464,7 +488,7 @@ async function disposeJob(id: string): Promise<void> {
 
 interface RenderPlan {
   metadata: RenderMetadata;
-  media: Array<{ kind: "image" | "video"; path: string }>;
+  media: Array<{ kind: "image" | "video"; path: string; trimStart: number }>;
   narrationPath: string;
   musicPath: string | null;
 }
@@ -539,10 +563,50 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
               ? zoompan("1.25", `(iw-iw/zoom)*(on/${frameDivisor})`, "(ih-ih/zoom)/2")
               : "";
     const detail = `Cena ${index + 1} de ${media.length}`;
+    // Corte do vídeo: gera uma cópia que começa em `trimStart` e traz só o necessário
+    // para a cena (com folga). O que sobrar do vídeo original não entra na cena.
+    let inputPath = source.path;
+    let trimmedPath: string | null = null;
+    if (source.kind === "video" && source.trimStart > 0.01) {
+      trimmedPath = path.join(workDir, `trim-${String(index).padStart(3, "0")}.mp4`);
+      try {
+        await runFfmpeg(
+          [
+            "-y",
+            "-ss",
+            String(source.trimStart),
+            "-i",
+            source.path,
+            "-t",
+            String(perImage + 0.5),
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "14",
+            "-pix_fmt",
+            "yuv420p",
+            trimmedPath,
+          ],
+          job,
+        );
+        const trimmedStat = await fs.stat(trimmedPath).catch(() => null);
+        if (trimmedStat?.size) inputPath = trimmedPath;
+      } catch (error) {
+        if (error instanceof CancelledError) throw error;
+        // Ponto de corte além do fim do vídeo: usa o vídeo inteiro em vez de falhar.
+        console.warn(
+          `[render-service] job=${id} corte do vídeo ${index + 1} inválido; usando o início do arquivo`,
+          error,
+        );
+      }
+    }
     const commonInput =
       source.kind === "video"
-        ? ["-y", "-stream_loop", "-1", "-i", source.path]
-        : ["-y", "-loop", "1", "-framerate", String(metadata.fps), "-i", source.path];
+        ? ["-y", "-stream_loop", "-1", "-i", inputPath]
+        : ["-y", "-loop", "1", "-framerate", String(metadata.fps), "-i", inputPath];
     const dissolveDuration = Math.max(0.01, Math.min(metadata.fade, perImage / 2));
     const strictDissolve =
       metadata.motionEffect === "dissolve"
@@ -585,6 +649,7 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
       });
     });
     segmentPaths.push(segmentPath);
+    if (trimmedPath) await fs.unlink(trimmedPath).catch(() => {});
     console.log(`[render-service] job=${id} segmento ${index + 1}/${media.length} concluído`);
   }
 
@@ -770,7 +835,7 @@ export async function startRenderJob(
       : [];
   if (!rawMedia.length) throw new Error("Nenhuma imagem ou vídeo foi recebido pelo servidor.");
   if (rawMedia.length > 200) throw new Error("O limite é de 200 mídias por vídeo.");
-  const media: Array<{ kind: "image" | "video"; path: string }> = [];
+  const media: Array<{ kind: "image" | "video"; path: string; trimStart: number }> = [];
   for (const item of rawMedia) {
     const record = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
     const kind = record["kind"] === "video" ? "video" : "image";
@@ -782,7 +847,11 @@ export async function startRenderJob(
     await fs.access(filePath).catch(() => {
       throw new Error(`A mídia ${stored} não chegou ao servidor.`);
     });
-    media.push({ kind, path: filePath });
+    media.push({
+      kind,
+      path: filePath,
+      trimStart: kind === "video" ? numberInRange(record["trimStart"], 0, 0, 36_000) : 0,
+    });
   }
 
   const storedNarration = safeStoredName(body.narration);

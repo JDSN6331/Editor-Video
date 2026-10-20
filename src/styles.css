@@ -190,4 +190,13 @@
     box-shadow: var(--shadow-panel);
     backdrop-filter: blur(20px) saturate(135%);
   }
+
+  @media (min-width: 80rem) {
+    .studio-resources-panel {
+      position: fixed;
+      top: calc(6.5rem + 1px);
+      right: max(1.25rem, calc((100vw - 93.75rem) / 2 + 1.25rem));
+      width: 18.75rem;
+    }
+  }
 }

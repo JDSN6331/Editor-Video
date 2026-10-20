@@ -217,9 +217,10 @@ function collectProjectAssets(project: ProjectRecord): PersistedAsset[] {
       id?: string;
       name?: string;
       dataUrl?: string;
+      isPlaceholder?: boolean;
     }>;
     images.forEach((image, index) => {
-      if (!image.dataUrl) return;
+      if (!image.dataUrl || image.isPlaceholder) return;
       const asset = dataUrlToAsset(
         project.id,
         "image",
@@ -320,7 +321,9 @@ export async function listProjects(): Promise<ProjectSummary[]> {
     return res.rows.map((row) => {
       let imageCount = 0;
       try {
-        imageCount = JSON.parse(row.imagesJson || "[]").length;
+        imageCount = (
+          JSON.parse(row.imagesJson || "[]") as Array<{ isPlaceholder?: boolean }>
+        ).filter((image) => !image.isPlaceholder).length;
       } catch {
         // ignore
       }
@@ -354,7 +357,9 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   return rows.map((row) => {
     let imageCount = 0;
     try {
-      imageCount = JSON.parse(row.imagesJson || "[]").length;
+      imageCount = (
+        JSON.parse(row.imagesJson || "[]") as Array<{ isPlaceholder?: boolean }>
+      ).filter((image) => !image.isPlaceholder).length;
     } catch {
       // ignore
     }

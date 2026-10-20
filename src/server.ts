@@ -21,7 +21,8 @@ async function proxyRenderApi(request: Request): Promise<Response | null> {
   const sourceUrl = new URL(request.url);
   if (
     !sourceUrl.pathname.startsWith("/api/render") &&
-    !sourceUrl.pathname.startsWith("/api/transcode")
+    !sourceUrl.pathname.startsWith("/api/transcode") &&
+    !sourceUrl.pathname.startsWith("/api/transcribe")
   ) {
     return null;
   }

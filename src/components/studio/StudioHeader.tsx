@@ -1,6 +1,7 @@
 import { Clapperboard, Cloud } from "lucide-react";
 import { useVideoProject } from "@/contexts/VideoProjectContext";
 import { formatTime } from "@/lib/video/captions";
+import { isFilledMedia } from "@/lib/video/types";
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
@@ -13,10 +14,11 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 export function StudioHeader() {
   const { duration, images, perImage } = useVideoProject();
+  const filledMediaCount = images.filter(isFilledMedia).length;
 
   return (
     <header className="sticky top-0 z-40 border-b border-white/10 bg-background/55 shadow-[0_10px_40px_-24px_oklch(0.72_0.19_45/0.35)] backdrop-blur-2xl">
-      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-5 py-4">
+      <div className="mx-auto flex max-w-[1500px] flex-wrap items-center justify-between gap-4 px-5 py-4">
         {/* Logo e identificação do estúdio */}
         <div className="flex items-center gap-3">
           <span
@@ -42,7 +44,7 @@ export function StudioHeader() {
         {/* Estatísticas do Vídeo em Tempo Real */}
         <div className="flex items-center gap-5 text-sm">
           <Stat label="Duração" value={duration ? formatTime(duration) : "—"} />
-          <Stat label="Imagens" value={images.length ? String(images.length) : "—"} />
+          <Stat label="Imagens" value={filledMediaCount ? String(filledMediaCount) : "—"} />
           <Stat
             label="Média por cena"
             value={perImage ? `${perImage.toFixed(3).replace(".", ",")}s` : "—"}

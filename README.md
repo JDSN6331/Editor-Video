@@ -49,10 +49,25 @@ O frontend e o renderizador de video sao processos separados:
 - `npm run dev:backend`: compila e inicia a API Node/FFmpeg na porta 3001.
 - `npm run dev`: inicia os dois processos e mostra os dois logs no mesmo terminal.
 
-Em desenvolvimento, o Vite encaminha `/api/render/*` e `/api/transcode/*` para
+Em desenvolvimento, o Vite encaminha `/api/render/*`, `/api/transcode/*` e
+`/api/transcribe` para
 `http://127.0.0.1:3001`. Em producao, publique o backend como um segundo servico
 no Easypanel usando `Dockerfile.backend`. No servico do frontend, defina
 `RENDER_API_INTERNAL_URL` com o
 endereco interno do backend (por exemplo, `http://editor-video-backend:3001`).
 O navegador usa `/api`, e o frontend encaminha as requisicoes ao renderizador
 sem expor o dominio separado do backend nem depender de CORS.
+
+## Transcricao das legendas
+
+A geracao profissional de legendas usa a narracao como fonte de verdade e mantem
+timestamps por palavra. Configure estas variaveis somente no backend:
+
+```env
+OPENAI_API_KEY=sua-chave
+OPENAI_TRANSCRIPTION_LANGUAGE=pt
+```
+
+`OPENAI_TRANSCRIPTION_LANGUAGE` e opcional. A chave nunca deve usar o prefixo
+`VITE_`, pois isso a exporia no navegador. Sem a chave, o editor preserva o modo
+local anterior, que distribui o roteiro pelas pausas detectadas no audio.
