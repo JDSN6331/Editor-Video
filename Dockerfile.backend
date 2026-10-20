@@ -12,7 +12,9 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY backend ./backend
-COPY src/server ./src/server
+# O backend reutiliza modulos compartilhados em src/lib. Copiar todo o src
+# garante que imports do bundle existam no builder; apenas dist vai para a imagem final.
+COPY src ./src
 RUN grep -q '"/api/render/drive-progress"' src/server/node-handler.ts \
   && grep -q '\["image", "video", "narration", "music"\]' src/server/render-service.ts \
   && echo "Building backend revision ${GIT_SHA}" \
