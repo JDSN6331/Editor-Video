@@ -62,6 +62,12 @@ let alignScriptToScenes: (
   }>,
 ) => string[];
 let formatTime: (seconds: number, ms?: boolean) => string;
+let buildSceneFramePlan: (
+  scenes: Array<{ start: number; end: number }> | null,
+  mediaCount: number,
+  duration: number,
+  fps: number,
+) => Array<{ startFrame: number; endFrame: number; frames: number; duration: number }>;
 
 before(async () => {
   vite = await createServer({
@@ -77,6 +83,7 @@ before(async () => {
   ));
   ({ normalizeAudioSegment } = await vite.ssrLoadModule("/src/lib/video/audio.ts"));
   ({ formatTime } = await vite.ssrLoadModule("/src/lib/video/captions.ts"));
+  ({ buildSceneFramePlan } = await vite.ssrLoadModule("/src/lib/video/sceneFrames.ts"));
 });
 
 after(async () => {
@@ -260,4 +267,69 @@ test("normaliza o arredondamento do relógio ao completar um segundo", () => {
   assert.equal(formatTime(9.9996, true), "00:10,000");
   assert.equal(formatTime(59.9996, true), "01:00,000");
   assert.equal(formatTime(Number.NaN, true), "00:00,000");
+});
+
+test("limita cada mídia ao fim declarado da respectiva cena", () => {
+  const plan = buildSceneFramePlan(
+    [
+      { start: 0, end: 4 },
+      { start: 4, end: 12 },
+      { start: 12, end: 17 },
+    ],
+    3,
+    17,
+    30,
+  );
+
+  assert.deepEqual(
+    plan.map(({ startFrame, endFrame, frames, duration }) => ({
+      startFrame,
+      endFrame,
+      frames,
+      duration,
+    })),
+    [
+      { startFrame: 0, endFrame: 120, frames: 120, duration: 4 },
+      { startFrame: 120, endFrame: 360, frames: 240, duration: 8 },
+      { startFrame: 360, endFrame: 510, frames: 150, duration: 5 },
+    ],
+  );
+});
+
+test("rejeita lacunas que fariam uma cena invadir a próxima", () => {
+  assert.throws(
+    () =>
+      buildSceneFramePlan(
+        [
+          { start: 0, end: 8 },
+          { start: 12, end: 20 },
+        ],
+        2,
+        20,
+        30,
+      ),
+    /não começa onde a cena anterior termina|nao comeca onde a cena anterior termina/,
+  );
+});
+
+test("arredonda fronteiras cumulativamente sem aumentar cenas intermediárias", () => {
+  const plan = buildSceneFramePlan(
+    [
+      { start: 0, end: 1.015 },
+      { start: 1.015, end: 2.025 },
+      { start: 2.025, end: 3.04 },
+    ],
+    3,
+    3.04,
+    30,
+  );
+
+  assert.deepEqual(
+    plan.map((scene) => scene.frames),
+    [30, 31, 31],
+  );
+  assert.equal(
+    plan.reduce((total, scene) => total + scene.frames, 0),
+    Math.ceil(3.04 * 30),
+  );
 });

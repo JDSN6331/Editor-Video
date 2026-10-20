@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { activeJobs, getFfmpegPath } from "./transcode-service";
+import { buildSceneFramePlan } from "../lib/video/sceneFrames";
 
 /**
  * Montagem de vídeo 100% no servidor (FFmpeg nativo).
@@ -318,32 +319,6 @@ function validateMetadata(raw: unknown): RenderMetadata {
   };
 }
 
-/**
- * Início de cada cena na narração. Na ausência de intervalos, mantém o fallback
- * legado uniforme; intervalos enviados precisam corresponder 1:1 às mídias.
- */
-function resolveSceneStarts(
-  scenes: RenderMetadata["scenes"],
-  mediaCount: number,
-  duration: number,
-): number[] {
-  const even = Array.from({ length: mediaCount }, (_, index) => (index * duration) / mediaCount);
-  if (!scenes) return even;
-  if (scenes.length !== mediaCount) {
-    throw new Error(
-      `A montagem exige uma mídia por trecho da narração (${mediaCount} mídias para ${scenes.length} trechos).`,
-    );
-  }
-  const starts = scenes.map((scene, index) => (index === 0 ? 0 : scene.start));
-  const valid = starts.every(
-    (start, index) => start < duration && (index === 0 || start > starts[index - 1]!),
-  );
-  if (!valid) {
-    throw new Error("Os limites dos trechos da narração são inválidos ou não estão ordenados.");
-  }
-  return starts;
-}
-
 function assTime(seconds: number): string {
   const safe = Math.max(0, seconds);
   const hours = Math.floor(safe / 3600);
@@ -513,9 +488,11 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
   // Cada cena dura exatamente o trecho da narração dela. Os limites são arredondados
   // para quadros de forma cumulativa, assim o erro não se acumula entre as cenas e
   // as trocas ficam alinhadas com a fala e as legendas do início ao fim.
-  const sceneStarts = resolveSceneStarts(metadata.scenes, media.length, metadata.duration);
-  const boundaryFrames = [...sceneStarts, metadata.duration].map((time) =>
-    Math.round(time * metadata.fps),
+  const sceneFramePlan = buildSceneFramePlan(
+    metadata.scenes,
+    media.length,
+    metadata.duration,
+    metadata.fps,
   );
   // A superfície 4x reduz o arredondamento do zoompan que fazia o centro
   // oscilar entre pixels e dava a impressão de imagem tremendo.
@@ -535,9 +512,9 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
 
   for (let index = 0; index < media.length; index += 1) {
     const source = media[index]!;
-    const frames = Math.max(1, boundaryFrames[index + 1]! - boundaryFrames[index]!);
+    const frames = sceneFramePlan[index]!.frames;
     const motionFrames = frames * 2;
-    const perImage = frames / metadata.fps;
+    const perImage = sceneFramePlan[index]!.duration;
     const segmentPath = path.join(workDir, `segment-${String(index).padStart(3, "0")}.mp4`);
     const animatedBase = `scale=${scaledWidth}:${scaledHeight}:force_original_aspect_ratio=increase,crop=${scaledWidth}:${scaledHeight}`;
     // O caminho estatico evita zoompan e reamostragem redundante: cada quadro
@@ -571,14 +548,15 @@ async function runRenderJob(job: RenderJob, plan: RenderPlan): Promise<void> {
       metadata.motionEffect === "dissolve"
         ? `,fade=t=in:st=0:d=${dissolveDuration},fade=t=out:st=${Math.max(0, perImage - dissolveDuration)}:d=${dissolveDuration}`
         : "";
+    const strictDuration = `,trim=end_frame=${frames},setpts=N/(${metadata.fps}*TB)`;
     const segmentArgs = [
       ...commonInput,
       "-vf",
       source.kind === "video"
-        ? `${staticBase},fps=${metadata.fps},setsar=1,format=yuv420p${strictDissolve}`
+        ? `${staticBase},fps=${metadata.fps}${strictDuration},setsar=1,format=yuv420p${strictDissolve}`
         : metadata.motionEffect === "none" || metadata.motionEffect === "dissolve"
-          ? `${staticBase},setsar=1,format=yuv420p${strictDissolve}`
-          : `${animatedBase}${motion},scale=${metadata.width}:${metadata.height}:flags=lanczos,tmix=frames=2:weights='1 1',fps=${metadata.fps},setsar=1,format=yuv420p`,
+          ? `${staticBase},fps=${metadata.fps}${strictDuration},setsar=1,format=yuv420p${strictDissolve}`
+          : `${animatedBase}${motion},scale=${metadata.width}:${metadata.height}:flags=lanczos,tmix=frames=2:weights='1 1',fps=${metadata.fps}${strictDuration},setsar=1,format=yuv420p`,
     ];
     segmentArgs.push(
       "-frames:v",
